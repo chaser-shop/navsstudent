@@ -363,6 +363,7 @@ route('POST', '/api/auth/login', async ({ body, ip }) => {
       user.isAdmin = true;
       await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
     }
+    if (!Array.isArray(user.deviceIds)) user.deviceIds = user.deviceId ? [String(user.deviceId)] : [];
     if (!user.deviceIds.includes(deviceId)) {
       if (user.deviceIds.length === 0) {
         // Адміністратор відв'язав усі пристрої — перший, хто увійде, стає новим.
