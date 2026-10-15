@@ -553,7 +553,7 @@
       ? `<button class="chk ${hwDone(h) ? 'on' : ''}" data-act="done" data-id="${esc(h.id)}" aria-label="Виконано">${ic(hwDone(h) ? 'checkc' : 'circle', 26)}</button>`
       : `<span class="chk st" style="color:${h.status === 'pending' ? 'var(--warn)' : 'var(--red)'}">${ic(h.status === 'pending' ? 'clock' : 'xc', 26)}</span>`;
     return `<div class="hw">${left}<div class="hw-main">
-      <button class="body" data-act="hwEdit" data-id="${esc(h.id)}">
+      <button class="body" data-act="hwOpen" data-id="${esc(h.id)}">
         <div class="subj" style="color:${subjColor(h.subjectKey)}">${esc(subjName(h.subjectKey))} ${hwBadge(h)}</div>
         <div class="txt ${hwDone(h) ? 'done' : ''}">${esc(h.text)}</div>
         <div class="muted small">До ${dayMonth(h.due)}</div>
@@ -833,12 +833,22 @@
         <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isAdmin() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
   }
 
-  function openHomeworkView(h) {
+  function openHomeworkView(h0) {
+    const cur = () => S.homework.find((x) => x.id === h0.id) || h0;
     return openSheet({
+      viewId: h0.id,
       title: 'Домашнє',
-      render: () => card(`<div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))}</div>
-        <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
-        <div class="muted small">До ${dayMonth(h.due)}${h.authorName ? ' · додав(ла): ' + esc(h.authorName) : ''}</div>`),
+      right: () => canEdit(cur()) ? '<button class="link" data-act="hwEditFromView">Редагувати</button>' : '',
+      render: () => {
+        const h = cur();
+        const links = (h.links || []).map((u) => `<a class="chip-link" href="${esc(u)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(shortUrl(u))}</a>`).join('');
+        const imgs = (h.images || []).map((id) => `<button class="full-btn" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id, 'full')}</button>`).join('');
+        return card(`<div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))} ${hwBadge(h)}</div>
+          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>
+          <div class="muted small">До ${dayMonth(h.due)}${h.authorName ? ' · додав(ла): ' + esc(h.authorName) : ''}</div>`)
+          + (links ? card(`<span class="label">Посилання</span><div class="att">${links}</div>`) : '')
+          + (imgs ? card(`<span class="label">Зображення</span>${imgs}`) : '');
+      },
     });
   }
 
@@ -865,7 +875,7 @@
           ${item.links.map((u, i) => `<div class="att-row"><a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a><button type="button" class="link" data-act="linkDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}
           ${item.links.length < MAX_LINKS ? `<div class="att-add"><input class="field" name="linkInput" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Вставте посилання"><button type="button" class="btn deep" data-act="linkAdd">Додати</button></div>` : ''}
           <span class="label">Зображення</span>
-          ${item.images.length || sheet.uploading ? `<div class="thumbs">${item.images.map((id, i) => `<div class="thumb">${imgTag(id)}<button type="button" class="x" data-act="imgDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}${sheet.uploading ? '<div class="thumb"><span class="spin"></span></div>' : ''}</div>` : ''}
+          ${item.images.length || sheet.uploading ? `<div class="thumbs">${item.images.map((id, i) => `<div class="thumb"><button type="button" class="thumb-btn" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id)}</button><button type="button" class="x" data-act="imgDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}${sheet.uploading ? '<div class="thumb"><span class="spin"></span></div>' : ''}</div>` : ''}
           ${item.images.length < MAX_IMAGES ? `<label class="btn deep att-pick">Додати зображення<input type="file" accept="image/*" multiple data-chg="hwImages" hidden></label>` : ''}
         </div>
         ${!isAdmin() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор.</div>' : ''}
@@ -1221,6 +1231,20 @@
       const h = S.homework.find((x) => x.id === el.dataset.id);
       if (!h) return;
       if (canEdit(h)) openHomeworkForm(Object.assign({}, h)); else openHomeworkView(h);
+    },
+    hwOpen(el) {
+      const h = S.homework.find((x) => x.id === el.dataset.id);
+      if (h) openHomeworkView(h);
+    },
+    hwEditFromView(el) {
+      const s = sheetOf(el); if (!s) return;
+      const id = s.viewId;
+      const h = S.homework.find((x) => x.id === id);
+      if (!h || !canEdit(h)) return;
+      // closeSheet() працює через history.back() (асинхронно) — форму відкриваємо вже після закриття перегляду.
+      const reopen = () => { window.removeEventListener('popstate', reopen); setTimeout(() => openHomeworkForm(Object.assign({}, h)), 0); };
+      window.addEventListener('popstate', reopen);
+      closeSheet();
     },
     linkAdd(el) {
       const s = sheetOf(el); if (!s) return;

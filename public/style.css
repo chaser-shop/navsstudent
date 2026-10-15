@@ -239,3 +239,7 @@ html[data-device="320x568"] .tab, html[data-device="375x667"] .tab { font-size: 
 .att-pick { cursor: pointer; }
 img.full { width: 100%; height: auto; border-radius: 8px; display: block; }
 img.broken { opacity: .35; }
+
+.thumb-btn { position: absolute; inset: 0; padding: 0; }
+.full-btn { display: block; width: 100%; padding: 0; }
+.full-btn img.full { max-height: 70vh; object-fit: contain; background: var(--deep); }

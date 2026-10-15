@@ -1,5 +1,5 @@
 /* Service worker: офлайн-оболонка + Web Push сповіщення. */
-const CACHE = 'diary-shell-v5';
+const CACHE = 'diary-shell-v6';
 const SHELL = ['/', '/style.css', '/app.js', '/schedule.js', '/device.js', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
