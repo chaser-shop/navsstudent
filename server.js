@@ -102,7 +102,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 // ───────────────────────── База даних ─────────────────────────
 
-let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw;
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers;
 let SECRET;
 let VAPID_KEY_ID = '';
 
@@ -131,6 +131,7 @@ async function initDb() {
   pushSubs = db.collection('pushSubs');
   sent = db.collection('sentNotifications');
   config = db.collection('config');
+  answers = db.collection('answers'); // кому з користувачів уже відповів на «Що задали?» (діє на всіх його пристроях)
   noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
@@ -138,6 +139,8 @@ async function initDb() {
   await lessons.createIndex({ end: 1 });
   await homework.createIndex({ due: 1 });
   await pushSubs.createIndex({ userId: 1 });
+  await answers.createIndex({ userId: 1 });
+  await answers.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await noHw.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await sent.createIndex({ at: 1 }, { expireAfterSeconds: 3 * 24 * 3600 });
 
@@ -493,7 +496,7 @@ route('POST', '/api/auth/device-status', async ({ body, ip }) => {
 // — синхронізація
 route('GET', '/api/sync', async ({ user }) => {
   const since = new Date(Date.now() - 60 * 24 * 3600 * 1000);
-  const [ls, subs, tchs, hws, title, reqUsers, noHws] = await Promise.all([
+  const [ls, subs, tchs, hws, title, reqUsers, noHws, myAnswers] = await Promise.all([
     lessons.find({}).sort({ start: 1 }).toArray(),
     subjects.find({}).toArray(),
     teachers.find({}).toArray(),
@@ -501,6 +504,7 @@ route('GET', '/api/sync', async ({ user }) => {
     config.findOne({ _id: 'scheduleTitle' }),
     user.isAdmin ? users.find({ 'pendingDevices.0': { $exists: true } }).toArray() : [],
     noHw.find({}).toArray(),
+    answers.find({ userId: user._id }).toArray(),
   ]);
   const subjectMap = {};
   for (const s of subs) subjectMap[s._id] = { fullName: s.fullName || '', link: s.link || '' };
@@ -511,6 +515,7 @@ route('GET', '/api/sync', async ({ user }) => {
     user: pubUser(user),
     scheduleTitle: (title && title.value) || '',
     noHomework: noHws.map((x) => x._id),
+    answered: myAnswers.map((x) => x.lessonId),
     deviceRequests: reqUsers.reduce((n, u) => n + u.pendingDevices.length, 0),
     lessons: ls.map(pubLesson),
     subjects: subjectMap,
@@ -546,6 +551,22 @@ route('PUT', '/api/schedule', async ({ body }) => {
   await config.updateOne({ _id: 'scheduleTitle' }, { $set: { value: str(body.title, 300) } }, { upsert: true });
   return ok();
 }, { admin: true });
+
+// — відповідь на «Що задали?» (запам'ятовується за користувачем, а не за пристроєм)
+async function saveAnswers(user, ids) {
+  for (const id of ids) {
+    await answers.updateOne({ _id: `${user._id}|${id}` }, { $set: { userId: user._id, lessonId: id, at: new Date() } }, { upsert: true });
+  }
+}
+route('POST', '/api/lessons/:id/answered', async ({ params, user }) => {
+  await saveAnswers(user, [str(params.id, 40)]);
+  return ok();
+});
+route('POST', '/api/answered', async ({ body, user }) => {
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map((x) => str(x, 40)).filter(Boolean).slice(0, 300);
+  await saveAnswers(user, ids);
+  return ok();
+});
 
 // — «нічого не задали» (адмін): плашка «Що задали?» зникає в усіх
 route('POST', '/api/lessons/:id/no-homework', async ({ params }) => {

@@ -137,6 +137,14 @@
     S.scheduleTitle = r.scheduleTitle || '';
     S.deviceRequests = r.deviceRequests || 0;
     S.noHw = new Set(r.noHomework || []);
+    if (Array.isArray(r.answered)) {
+      // Відповіді, дані на іншому пристрої, підтягуються з сервера; локальні, яких там ще немає, — відправляються туди.
+      const server = new Set(r.answered);
+      const extra = [...S.answered].filter((id) => !server.has(id));
+      r.answered.forEach((id) => S.answered.add(id));
+      LS.set('answered', [...S.answered]);
+      if (extra.length && S.token) api('POST', '/api/answered', { ids: extra }).catch(() => {});
+    }
     const ids = new Set();
     S.homework = (r.homework || []).map((h) => {
       ids.add(h.id);
@@ -302,7 +310,11 @@
     render();
   }
 
-  function markAnswered(id) { S.answered.add(id); LS.set('answered', [...S.answered]); }
+  function markAnswered(id) {
+    S.answered.add(id);
+    LS.set('answered', [...S.answered]);
+    if (S.token) api('POST', `/api/lessons/${encodeURIComponent(id)}/answered`).catch(() => {});
+  }
   function toggleDone(id) {
     if (S.done.has(id)) S.done.delete(id); else S.done.add(id);
     LS.set('done', [...S.done]);
