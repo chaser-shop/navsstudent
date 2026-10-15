@@ -164,6 +164,7 @@
       LS.set('cache', r);
       S.syncError = '';
       ensurePush();
+      maybeAskPush();
     } catch (e) {
       if (e.status !== 401) S.syncError = e.message;
     } finally {
@@ -231,6 +232,7 @@
 
   let loginNotice = '';
   function forceSignOut(notice) {
+    removePushAsk();
     S.token = null; S.user = null;
     LS.del('token');
     resetLocal();
@@ -569,6 +571,7 @@
   function render() {
     const app = $('#app');
     if (!S.user) {
+      removePushAsk();
       if (S.token) { app.innerHTML = '<div class="login"><div class="spin" style="margin:80px auto;width:28px;height:28px"></div></div>'; return; }
       if (!$('#loginForm')) app.innerHTML = viewLogin();
       return;
@@ -914,6 +917,34 @@
     refreshPushState();
   }
 
+  // ───────────── запит дозволу на сповіщення при першому заході ─────────────
+  // Системний запит браузер дозволяє показати лише після натискання користувача,
+  // тому спершу показуємо власне вікно з кнопкою «Дозволити».
+
+  const ASK_AGAIN_MS = 24 * 60 * 60 * 1000; // після «Не зараз» питаємо знову через добу
+
+  function removePushAsk() { const el = document.getElementById('pushAsk'); if (el) el.remove(); }
+
+  function maybeAskPush() {
+    if (!S.user || !S.token) { removePushAsk(); return; }
+    if (document.getElementById('pushAsk')) return;
+    if (!pushSupported() || Notification.permission !== 'default') return; // уже дозволено/заборонено або не підтримується
+    const last = LS.get('pushAskedAt', 0);
+    if (last && Date.now() - last < ASK_AGAIN_MS) return;
+    const box = document.createElement('div');
+    box.id = 'pushAsk';
+    box.className = 'push-ask';
+    box.innerHTML = `
+      <div class="push-ask-card" role="dialog" aria-modal="true" aria-labelledby="pushAskTitle">
+        <div class="push-ask-ico">🔔</div>
+        <h2 id="pushAskTitle">Увімкнути сповіщення?</h2>
+        <p class="muted">Нагадаємо про пару за кілька хвилин до початку, а після неї — спитаємо, що задали. Працює й коли щоденник закрито.</p>
+        <button class="btn" data-act="pushAllow">Дозволити</button>
+        <button class="link" data-act="pushLater">Не зараз</button>
+      </div>`;
+    document.body.appendChild(box);
+  }
+
   let settingsTimer = null;
   function pushSettingsChanged() {
     clearTimeout(settingsTimer);
@@ -1155,6 +1186,8 @@
       saveSettings(); pushSettingsChanged(); render();
     },
     pushOn() { enablePush(); },
+    async pushAllow() { removePushAsk(); LS.set('pushAskedAt', Date.now()); await enablePush(); },
+    pushLater() { LS.set('pushAskedAt', Date.now()); removePushAsk(); },
     pushOff() { disablePush(); },
     async pushTest(el) {
       await withBusy(el, async () => {

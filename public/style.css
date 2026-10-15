@@ -213,3 +213,11 @@ input[type="date"].field { min-height: 42px; -webkit-appearance: none; appearanc
 html[data-device="320x568"], html[data-device="375x667"] { --tab-h: 52px; }
 html[data-device="320x568"] .tab, html[data-device="375x667"] .tab { font-size: 9.5px; }
 @media (max-width: 340px) { .tab { font-size: 9px; } .content { padding-left: 12px; padding-right: 12px; } }
+
+/* ── запит дозволу на сповіщення ── */
+.push-ask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; padding: 16px 16px calc(var(--sab) + 16px); }
+.push-ask-card { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 24px 20px 12px; text-align: center; display: flex; flex-direction: column; gap: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+.push-ask-card h2 { margin: 0; font-size: 20px; }
+.push-ask-card p { margin: 0; font-size: 14px; line-height: 1.4; }
+.push-ask-ico { font-size: 40px; line-height: 1; }
+@media (min-width: 600px) { .push-ask { align-items: center; } }
