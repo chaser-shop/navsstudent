@@ -163,7 +163,7 @@
       applySync(r);
       LS.set('cache', r);
       S.syncError = '';
-      ensurePush();
+      await ensurePush();
       maybeAskPush();
     } catch (e) {
       if (e.status !== 401) S.syncError = e.message;
@@ -921,26 +921,37 @@
   // Системний запит браузер дозволяє показати лише після натискання користувача,
   // тому спершу показуємо власне вікно з кнопкою «Дозволити».
 
-  const ASK_AGAIN_MS = 24 * 60 * 60 * 1000; // після «Не зараз» питаємо знову через добу
+  // Питаємо при кожному заході (завантаженні сторінки або поверненні в застосунок після 30+ хв),
+  // доки сповіщення не ввімкнені. «Не зараз» ховає вікно лише до наступного заходу.
+  let askDismissed = false;
+  let hiddenAt = 0;
 
   function removePushAsk() { const el = document.getElementById('pushAsk'); if (el) el.remove(); }
 
-  function maybeAskPush() {
+  async function maybeAskPush() {
     if (!S.user || !S.token) { removePushAsk(); return; }
-    if (document.getElementById('pushAsk')) return;
-    if (!pushSupported() || Notification.permission !== 'default') return; // уже дозволено/заборонено або не підтримується
-    const last = LS.get('pushAskedAt', 0);
-    if (last && Date.now() - last < ASK_AGAIN_MS) return;
+    if (askDismissed || document.getElementById('pushAsk') || !pushSupported()) return;
+    const perm = Notification.permission;
+    let subscribed = false;
+    try { subscribed = !!(await getSub()); } catch (e) { /* ignore */ }
+    if (perm === 'granted' && subscribed) return; // усе ввімкнено
+    if (!S.user || document.getElementById('pushAsk')) return;
+    const denied = perm === 'denied';
+    const howTo = isIOS
+      ? 'Відкрийте «Налаштування» iPhone → «Сповіщення» → «Щоденник» і ввімкніть «Дозволити сповіщення». Потім поверніться сюди.'
+      : 'Натисніть значок замка (або налаштувань) ліворуч від адреси сайту → «Сповіщення» → «Дозволити», а потім оновіть сторінку.';
     const box = document.createElement('div');
     box.id = 'pushAsk';
     box.className = 'push-ask';
     box.innerHTML = `
       <div class="push-ask-card" role="dialog" aria-modal="true" aria-labelledby="pushAskTitle">
-        <div class="push-ask-ico">🔔</div>
-        <h2 id="pushAskTitle">Увімкнути сповіщення?</h2>
-        <p class="muted">Нагадаємо про пару за кілька хвилин до початку, а після неї — спитаємо, що задали. Працює й коли щоденник закрито.</p>
-        <button class="btn" data-act="pushAllow">Дозволити</button>
-        <button class="link" data-act="pushLater">Не зараз</button>
+        <div class="push-ask-ico">${denied ? '🔕' : '🔔'}</div>
+        <h2 id="pushAskTitle">${denied ? 'Сповіщення вимкнені' : 'Увімкнути сповіщення?'}</h2>
+        <p class="muted">${denied
+          ? 'Без них ви не отримаєте нагадування про пари й нове домашнє. ' + howTo
+          : 'Нагадаємо про пару за кілька хвилин до початку, а після неї — спитаємо, що задали. Працює й коли щоденник закрито.'}</p>
+        ${denied ? '' : '<button class="btn" data-act="pushAllow">Дозволити</button>'}
+        <button class="link" data-act="pushLater">${denied ? 'Зрозуміло' : 'Не зараз'}</button>
       </div>`;
     document.body.appendChild(box);
   }
@@ -1186,8 +1197,8 @@
       saveSettings(); pushSettingsChanged(); render();
     },
     pushOn() { enablePush(); },
-    async pushAllow() { removePushAsk(); LS.set('pushAskedAt', Date.now()); await enablePush(); },
-    pushLater() { LS.set('pushAskedAt', Date.now()); removePushAsk(); },
+    async pushAllow() { removePushAsk(); askDismissed = true; await enablePush(); },
+    pushLater() { askDismissed = true; removePushAsk(); },
     pushOff() { disablePush(); },
     async pushTest(el) {
       await withBusy(el, async () => {
@@ -1357,7 +1368,11 @@
       if (S.tab === 'today' || S.tab === 'schedule') render();
     }, 30000);
     setInterval(() => { if (S.user && !document.hidden) sync(); }, 120000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && S.user) { sync(); refreshPushState(); } });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 30 * 60 * 1000) askDismissed = false; // новий «захід»
+      if (S.user) { sync(); refreshPushState(); }
+    });
   }
 
   boot();
