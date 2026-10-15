@@ -221,3 +221,21 @@ html[data-device="320x568"] .tab, html[data-device="375x667"] .tab { font-size: 
 .push-ask-card p { margin: 0; font-size: 14px; line-height: 1.4; }
 .push-ask-ico { font-size: 40px; line-height: 1; }
 @media (min-width: 600px) { .push-ask { align-items: center; } }
+
+/* ── вкладення до домашнього ── */
+.hw-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.hw-main .body { flex: none; width: 100%; }
+.att { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; min-width: 0; max-width: 100%; }
+.chip-link { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--deep); padding: 6px 12px; border-radius: 99px; font-size: 13px; text-decoration: none; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb { position: relative; width: 72px; height: 72px; border-radius: 8px; overflow: hidden; background: var(--deep); display: grid; place-items: center; padding: 0; }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb .x { position: absolute; top: 3px; right: 3px; width: 22px; height: 22px; border-radius: 50%; background: rgba(0,0,0,.65); color: #fff; font-size: 12px; line-height: 1; display: grid; place-items: center; }
+.att-edit { display: flex; flex-direction: column; gap: 8px; }
+.att-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--deep); border-radius: 6px; padding: 4px 4px 4px 10px; }
+.att-row a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-size: 14px; }
+.att-add { display: flex; gap: 8px; }
+.att-add .btn { flex: none; width: auto; padding: 0 16px; }
+.att-pick { cursor: pointer; }
+img.full { width: 100%; height: auto; border-radius: 8px; display: block; }
+img.broken { opacity: .35; }

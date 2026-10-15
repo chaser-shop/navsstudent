@@ -102,7 +102,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 // ───────────────────────── База даних ─────────────────────────
 
-let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers;
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers, hwImages;
 let SECRET;
 let VAPID_KEY_ID = '';
 
@@ -132,12 +132,14 @@ async function initDb() {
   sent = db.collection('sentNotifications');
   config = db.collection('config');
   answers = db.collection('answers'); // кому з користувачів уже відповів на «Що задали?» (діє на всіх його пристроях)
+  hwImages = db.collection('hwImages'); // зображення, прикріплені до домашнього
   noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
   await lessons.createIndex({ start: 1 });
   await lessons.createIndex({ end: 1 });
   await homework.createIndex({ due: 1 });
+  await hwImages.createIndex({ hwId: 1 });
   await pushSubs.createIndex({ userId: 1 });
   await answers.createIndex({ userId: 1 });
   await answers.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
@@ -201,6 +203,7 @@ const pubLesson = (l) => ({
 const pubHw = (h) => ({
   id: h._id, subjectKey: h.subjectKey, lessonID: h.lessonID || null, text: h.text,
   due: h.due, created: h.created, status: h.status, authorID: h.authorID, authorName: h.authorName,
+  links: h.links || [], images: h.images || [],
 });
 
 // ───────────────────────── Push ─────────────────────────
@@ -592,23 +595,89 @@ route('PUT', '/api/teachers', async ({ body }) => {
 }, { admin: true });
 
 // — домашнє
-function readHomeworkBody(body) {
+const MAX_LINKS = 5;
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 1.5 * 1024 * 1024;
+
+function imageKind(buf) {
+  if (buf.length > 12 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length > 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+async function readHomeworkBody(body, user, hwId) {
   const subjectKey = str(body.subjectKey, 100);
   const text = str(body.text, 2000);
   const due = toDate(body.due);
   if (!subjectKey) throw new HttpError(400, 'Оберіть предмет.');
   if (!text) throw new HttpError(400, 'Опишіть, що задали.');
   if (!due) throw new HttpError(400, 'Некоректна дата.');
-  return { subjectKey, text, due, lessonID: body.lessonID ? str(body.lessonID, 40) : null };
+
+  const links = [];
+  for (const raw of Array.isArray(body.links) ? body.links : []) {
+    const l = cleanLink(raw);
+    if (l && !links.includes(l)) links.push(l);
+  }
+  if (links.length > MAX_LINKS) throw new HttpError(400, `Не більше ${MAX_LINKS} посилань.`);
+
+  const imageIds = [...new Set((Array.isArray(body.images) ? body.images : []).map((x) => str(x, 60)).filter(Boolean))];
+  if (imageIds.length > MAX_IMAGES) throw new HttpError(400, `Не більше ${MAX_IMAGES} зображень.`);
+  if (imageIds.length) {
+    const found = await hwImages.find({ _id: { $in: imageIds } }, { projection: { authorID: 1, hwId: 1 } }).toArray();
+    const known = new Map(found.map((i) => [i._id, i]));
+    for (const id of imageIds) {
+      const i = known.get(id);
+      if (!i || !(i.authorID === user._id || i.hwId === hwId)) throw new HttpError(400, 'Зображення не знайдено — завантажте його ще раз.');
+    }
+  }
+  return { subjectKey, text, due, lessonID: body.lessonID ? str(body.lessonID, 40) : null, links, images: imageIds };
+}
+
+// Зображення: клієнт стискає їх і надсилає base64; зберігаємо в MongoDB, віддаємо лише авторизованим.
+route('POST', '/api/images', async ({ body, user }) => {
+  const b64 = String(body.data || '').replace(/^data:[^,]*,/, '');
+  const buf = Buffer.from(b64, 'base64');
+  if (!buf.length) throw new HttpError(400, 'Порожнє зображення.');
+  if (buf.length > MAX_IMAGE_BYTES) throw new HttpError(413, 'Зображення завелике (максимум 1,5 МБ).');
+  const mime = imageKind(buf);
+  if (!mime) throw new HttpError(400, 'Підтримуються лише JPEG, PNG і WebP.');
+  const pending = await hwImages.countDocuments({ authorID: user._id, hwId: null });
+  if (pending >= 30) throw new HttpError(429, 'Забагато незбережених зображень. Збережіть домашнє й спробуйте ще раз.');
+  const id = crypto.randomUUID();
+  await hwImages.insertOne({ _id: id, data: buf, mime, authorID: user._id, hwId: null, created: new Date() });
+  return { id };
+});
+
+route('GET', '/api/images/:id', async ({ params }) => {
+  const img = await hwImages.findOne({ _id: params.id });
+  if (!img) throw new HttpError(404, 'Зображення не знайдено.');
+  const d = img.data;
+  const buf = Buffer.isBuffer(d) ? d : Buffer.from(d.buffer.subarray(0, d.position));
+  return { __raw: { mime: img.mime, buf } };
+});
+
+async function attachImages(hwId, ids, previous) {
+  const removed = (previous || []).filter((x) => !ids.includes(x));
+  if (removed.length) await hwImages.deleteMany({ _id: { $in: removed }, hwId });
+  if (ids.length) await hwImages.updateMany({ _id: { $in: ids } }, { $set: { hwId } });
+}
+
+// Незбережені (осиротілі) зображення старші за добу прибираємо.
+async function cleanOrphanImages() {
+  try { await hwImages.deleteMany({ hwId: null, created: { $lt: new Date(Date.now() - 24 * 3600 * 1000) } }); }
+  catch (e) { console.error('cleanOrphanImages:', e); }
 }
 
 route('POST', '/api/homework', async ({ body, user }) => {
-  const data = readHomeworkBody(body);
+  const id = crypto.randomUUID();
+  const data = await readHomeworkBody(body, user, id);
   const hw = {
-    _id: crypto.randomUUID(), ...data, created: new Date(),
+    _id: id, ...data, created: new Date(),
     status: user.isAdmin ? 'approved' : 'pending', authorID: user._id, authorName: user.fullName,
   };
   await homework.insertOne(hw);
+  await attachImages(id, data.images, []);
   (user.isAdmin ? notifyApproved : notifyPending)(hw);
   return ok();
 });
@@ -624,11 +693,12 @@ async function loadEditable(id, user) {
 
 route('PATCH', '/api/homework/:id', async ({ params, body, user }) => {
   const hw = await loadEditable(params.id, user);
-  const data = readHomeworkBody(body);
-  const set = { subjectKey: data.subjectKey, text: data.text, due: data.due };
+  const data = await readHomeworkBody(body, user, hw._id);
+  const set = { subjectKey: data.subjectKey, text: data.text, due: data.due, links: data.links, images: data.images };
   if (data.lessonID) set.lessonID = data.lessonID;
   if (!user.isAdmin && hw.status === 'rejected') set.status = 'pending';
   await homework.updateOne({ _id: hw._id }, { $set: set });
+  await attachImages(hw._id, data.images, hw.images);
   if (set.status === 'pending') notifyPending({ ...hw, ...set });
   return ok();
 });
@@ -650,6 +720,7 @@ route('POST', '/api/homework/:id/reject', async ({ params }) => {
 route('DELETE', '/api/homework/:id', async ({ params, user }) => {
   const hw = await loadEditable(params.id, user);
   await homework.deleteOne({ _id: hw._id });
+  await hwImages.deleteMany({ hwId: hw._id });
   return ok();
 });
 
@@ -814,7 +885,7 @@ const SECURITY = {
   'X-Frame-Options': 'DENY',
 };
 const CSP = "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
-  "img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'";
+  "img-src 'self' data: blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'";
 
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
@@ -871,6 +942,16 @@ async function handleApi(req, res, url) {
     const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
     const ip = ((req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket.remoteAddress || '').trim();
     const result = await r.handler({ req, params, query: url.searchParams, body, user, ip });
+    if (result && result.__raw) {
+      res.writeHead(200, {
+        'Content-Type': result.__raw.mime,
+        'Content-Length': result.__raw.buf.length,
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        'Content-Security-Policy': "default-src 'none'",
+        ...SECURITY,
+      });
+      return res.end(result.__raw.buf);
+    }
     sendJson(res, 200, result === undefined ? {} : result);
   } catch (e) {
     if (e instanceof HttpError) return sendJson(res, e.status, { error: e.message, ...e.extra });
@@ -930,6 +1011,8 @@ const server = http.createServer((req, res) => {
   VAPID_PUBLIC = await initDb();
   server.listen(PORT, () => console.log(`Щоденник: сервер слухає порт ${PORT}`));
   setInterval(tick, TICK_MS);
+  cleanOrphanImages();
+  setInterval(cleanOrphanImages, 6 * 3600 * 1000).unref();
 
   // Безкоштовні хостинги «присипляють» сервіс без запитів — тоді сповіщення не відправляються.
   // На Render сервіс сам себе «будить» раз на 10 хвилин (вимкнути: KEEP_ALIVE=0).

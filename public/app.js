@@ -394,6 +394,122 @@
       <button class="btn deep" data-act="hintOff">Зрозуміло</button>`, 'hint');
   }
 
+
+  // ───────────── вкладення до домашнього: посилання й зображення ─────────────
+
+  const MAX_LINKS = 5;
+  const MAX_IMAGES = 6;
+  const IMG = {};          // id → blob-URL (зображення завантажуються з токеном, тож <img src> напряму не підходить)
+  const imgLoading = {};
+  const imgFailed = new Set();
+
+  function loadImg(id) {
+    if (IMG[id]) return Promise.resolve(IMG[id]);
+    if (!imgLoading[id]) {
+      imgLoading[id] = fetch('/api/images/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.token } })
+        .then((r) => { if (!r.ok) throw new Error('img'); return r.blob(); })
+        .then((b) => { IMG[id] = URL.createObjectURL(b); return IMG[id]; })
+        .finally(() => { delete imgLoading[id]; });
+    }
+    return imgLoading[id];
+  }
+
+  function imgTag(id, cls) {
+    const c = cls ? ` class="${cls}"` : '';
+    if (IMG[id]) return `<img${c} src="${IMG[id]}" alt="">`;
+    if (imgFailed.has(id)) return `<img${c} class="broken" alt="Не завантажилось">`;
+    return `<img${c} data-img="${esc(id)}" alt="">`;
+  }
+
+  function hydrateImages() {
+    document.querySelectorAll('img[data-img]').forEach((el) => {
+      const id = el.dataset.img;
+      if (IMG[id]) { el.src = IMG[id]; el.removeAttribute('data-img'); return; }
+      if (!S.token) return;
+      loadImg(id)
+        .then((u) => { el.src = u; el.removeAttribute('data-img'); })
+        .catch(() => { imgFailed.add(id); el.removeAttribute('data-img'); el.classList.add('broken'); });
+    });
+  }
+  let hydrateQueued = false;
+  new MutationObserver(() => {
+    if (hydrateQueued) return;
+    hydrateQueued = true;
+    requestAnimationFrame(() => { hydrateQueued = false; hydrateImages(); });
+  }).observe(document.body, { childList: true, subtree: true });
+
+  function normLink(v) {
+    let t = String(v || '').trim();
+    if (!t) return '';
+    if (!t.includes('://')) t = 'https://' + t;
+    try {
+      const u = new URL(t);
+      return /^https?:$/.test(u.protocol) && u.hostname.includes('.') ? u.toString() : null;
+    } catch (e) { return null; }
+  }
+  const shortUrl = (u) => { const t = String(u).replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, ''); return t.length > 42 ? t.slice(0, 41) + '…' : t; };
+
+  function attHTML(h) {
+    const links = (h.links || []).map((u) => `<a class="chip-link" href="${esc(u)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(shortUrl(u))}</a>`).join('');
+    const imgs = (h.images || []).map((id) => `<button class="thumb" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id)}</button>`).join('');
+    return links || imgs ? `<div class="att">${links}${imgs ? `<div class="thumbs">${imgs}</div>` : ''}</div>` : '';
+  }
+
+  /** Стискає фото до розумного розміру (JPEG, довша сторона ≤ 1600 px) — щоб швидко вантажилося й не забивало базу. */
+  async function compressImage(file) {
+    let bmp = null;
+    if (window.createImageBitmap) { try { bmp = await createImageBitmap(file); } catch (e) { bmp = null; } }
+    if (!bmp) {
+      bmp = await new Promise((res, rej) => {
+        const url = URL.createObjectURL(file);
+        const im = new Image();
+        im.onload = () => { URL.revokeObjectURL(url); res(im); };
+        im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Не вдалося прочитати зображення.')); };
+        im.src = url;
+      });
+    }
+    const w0 = bmp.width || bmp.naturalWidth, h0 = bmp.height || bmp.naturalHeight;
+    if (!w0 || !h0) throw new Error('Не вдалося прочитати зображення.');
+    for (const [side, q] of [[1600, 0.78], [1280, 0.65], [1024, 0.5], [800, 0.45]]) {
+      const k = Math.min(1, side / Math.max(w0, h0));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w0 * k)); c.height = Math.max(1, Math.round(h0 * k));
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(bmp, 0, 0, c.width, c.height);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', q));
+      if (blob && blob.size <= 1.2 * 1024 * 1024) return blob;
+    }
+    throw new Error('Зображення завелике.');
+  }
+
+  const blobToB64 = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1] || '');
+    r.onerror = () => rej(new Error('Не вдалося прочитати файл.'));
+    r.readAsDataURL(blob);
+  });
+
+  async function addImages(s, files) {
+    const err = () => $('[data-role="err"]', s.el);
+    files = files.filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)).slice(0, MAX_IMAGES - s.item.images.length);
+    if (!files.length) return;
+    s.uploading = (s.uploading || 0) + files.length;
+    rerender(s);
+    let msg = '';
+    for (const f of files) {
+      try {
+        const blob = await compressImage(f);
+        const r = await api('POST', '/api/images', { data: await blobToB64(blob) });
+        IMG[r.id] = URL.createObjectURL(blob);
+        s.item.images.push(r.id);
+      } catch (e) { msg = e.message || 'Не вдалося додати зображення.'; }
+      s.uploading--;
+      rerender(s);
+    }
+    if (msg && err()) err().textContent = msg;
+  }
+
   // ───────────── екрани ─────────────
 
   function viewToday() {
@@ -436,12 +552,12 @@
     const left = h.status === 'approved'
       ? `<button class="chk ${hwDone(h) ? 'on' : ''}" data-act="done" data-id="${esc(h.id)}" aria-label="Виконано">${ic(hwDone(h) ? 'checkc' : 'circle', 26)}</button>`
       : `<span class="chk st" style="color:${h.status === 'pending' ? 'var(--warn)' : 'var(--red)'}">${ic(h.status === 'pending' ? 'clock' : 'xc', 26)}</span>`;
-    return `<div class="hw">${left}
+    return `<div class="hw">${left}<div class="hw-main">
       <button class="body" data-act="hwEdit" data-id="${esc(h.id)}">
         <div class="subj" style="color:${subjColor(h.subjectKey)}">${esc(subjName(h.subjectKey))} ${hwBadge(h)}</div>
         <div class="txt ${hwDone(h) ? 'done' : ''}">${esc(h.text)}</div>
         <div class="muted small">До ${dayMonth(h.due)}</div>
-      </button></div>`;
+      </button>${attHTML(h)}</div></div>`;
   }
 
   function viewHomework() {
@@ -712,20 +828,31 @@
         <button class="btn deep" data-act="saveLink" data-key="${esc(l.subjectKey)}">Зберегти посилання</button>`) : ''}
       ${card(`
         <span class="label">Домашнє після цієї пари</span>
-        ${items.length ? items.map((h) => `<div><div class="txt" style="white-space:pre-wrap">${esc(h.text)}</div>
+        ${items.length ? items.map((h) => `<div><div class="txt" style="white-space:pre-wrap">${esc(h.text)}</div>${attHTML(h)}
           <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`).join('') : '<div class="muted">Нічого не записано</div>'}
         <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isAdmin() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
   }
 
+  function openHomeworkView(h) {
+    return openSheet({
+      title: 'Домашнє',
+      render: () => card(`<div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))}</div>
+        <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
+        <div class="muted small">До ${dayMonth(h.due)}${h.authorName ? ' · додав(ла): ' + esc(h.authorName) : ''}</div>`),
+    });
+  }
+
   function openHomeworkForm(item) {
+    item.links = (item.links || []).slice();
+    item.images = (item.images || []).slice();
     const editing = !!item.id && S.homework.some((h) => h.id === item.id);
     const keys = subjectKeys();
     if (item.subjectKey && !keys.includes(item.subjectKey)) keys.push(item.subjectKey);
     const cur = editing ? S.homework.find((h) => h.id === item.id) : null;
-    return openSheet({
+    const sheet = {
       auto: false,
       closeLabel: 'Скасувати',
-      item, editing,
+      item, editing, uploading: 0,
       title: editing ? 'Домашнє' : 'Нове домашнє',
       right: () => `<button class="link" data-act="hwSave">${editing ? 'Зберегти' : isAdmin() ? 'Додати' : 'Надіслати'}</button>`,
       render: () => `<div class="form">
@@ -733,13 +860,22 @@
           ${keys.map((k) => `<option value="${esc(k)}" ${k === item.subjectKey ? 'selected' : ''}>${esc(subjName(k))}</option>`).join('')}</select></label>
         <label><span class="label">Що задали</span><textarea class="field" name="text" rows="5" placeholder="Що задали">${esc(item.text)}</textarea></label>
         <label><span class="label">Здати до</span><input class="field" type="date" name="due" value="${toInput(item.due)}"></label>
+        <div class="att-edit">
+          <span class="label">Посилання</span>
+          ${item.links.map((u, i) => `<div class="att-row"><a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a><button type="button" class="link" data-act="linkDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}
+          ${item.links.length < MAX_LINKS ? `<div class="att-add"><input class="field" name="linkInput" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Вставте посилання"><button type="button" class="btn deep" data-act="linkAdd">Додати</button></div>` : ''}
+          <span class="label">Зображення</span>
+          ${item.images.length || sheet.uploading ? `<div class="thumbs">${item.images.map((id, i) => `<div class="thumb">${imgTag(id)}<button type="button" class="x" data-act="imgDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}${sheet.uploading ? '<div class="thumb"><span class="spin"></span></div>' : ''}</div>` : ''}
+          ${item.images.length < MAX_IMAGES ? `<label class="btn deep att-pick">Додати зображення<input type="file" accept="image/*" multiple data-chg="hwImages" hidden></label>` : ''}
+        </div>
         ${!isAdmin() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор.</div>' : ''}
         ${editing && cur && cur.status === 'rejected' ? '<div class="muted small">Адміністратор відхилив це завдання. Виправте його й надішліть знову.</div>' : ''}
         <div class="err" data-role="err"></div>
         ${!editing && item.lessonID ? `<button class="btn deep" data-act="hwNone" data-lesson="${esc(item.lessonID)}">Нічого не задали</button>` : ''}
         ${editing && canEdit(cur || item) ? '<button class="btn red" data-act="hwDelete">Видалити</button>' : ''}
       </div>`,
-    });
+    };
+    return openSheet(sheet);
   }
 
   function openModeration() {
@@ -750,7 +886,7 @@
         if (!q.length) return card('<span class="muted">Немає завдань на підтвердження</span>');
         return q.map((h) => card(`
           <div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))}</div>
-          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>
+          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
           <div class="muted small">До ${dayMonth(h.due)} · додав(ла): ${esc(h.authorName)}</div>
           <div class="btn-row"><button class="btn green" data-act="approve" data-id="${esc(h.id)}">Підтвердити</button>
             <button class="btn red" data-act="reject" data-id="${esc(h.id)}">Відхилити</button></div>
@@ -1083,7 +1219,26 @@
     },
     hwEdit(el) {
       const h = S.homework.find((x) => x.id === el.dataset.id);
-      if (h && canEdit(h)) openHomeworkForm(Object.assign({}, h));
+      if (!h) return;
+      if (canEdit(h)) openHomeworkForm(Object.assign({}, h)); else openHomeworkView(h);
+    },
+    linkAdd(el) {
+      const s = sheetOf(el); if (!s) return;
+      const inp = $('[name=linkInput]', s.el);
+      const err = $('[data-role="err"]', s.el);
+      const v = normLink(inp.value);
+      if (!inp.value.trim()) return;
+      if (v === null) { err.textContent = 'Некоректне посилання.'; return; }
+      if (!s.item.links.includes(v)) s.item.links.push(v);
+      inp.value = '';
+      rerender(s);
+      $('[data-role="err"]', s.el).textContent = '';
+    },
+    linkDel(el) { const s = sheetOf(el); if (!s) return; s.item.links.splice(+el.dataset.i, 1); rerender(s); },
+    imgDel(el) { const s = sheetOf(el); if (!s) return; s.item.images.splice(+el.dataset.i, 1); rerender(s); },
+    imgOpen(el) {
+      const id = el.dataset.id;
+      openSheet({ auto: false, title: 'Зображення', render: () => `<img class="full" ${IMG[id] ? `src="${IMG[id]}"` : `data-img="${esc(id)}"`} alt="">` });
     },
     hwNone(el) { closeSheet(); answerNone(el.dataset.lesson); },
 
@@ -1098,9 +1253,17 @@
       if (!subjectKey) { err.textContent = 'Оберіть предмет.'; return; }
       if (!text) { err.textContent = 'Опишіть, що задали.'; return; }
       if (!due) { err.textContent = 'Вкажіть дату.'; return; }
+      const pend = $('[name=linkInput]', s.el);
+      if (pend && pend.value.trim()) {
+        const u = normLink(pend.value);
+        if (u === null) { err.textContent = 'Некоректне посилання (або очистіть поле).'; return; }
+        if (!s.item.links.includes(u)) s.item.links.push(u);
+      }
+      if (s.item.links.length > MAX_LINKS) { err.textContent = `Не більше ${MAX_LINKS} посилань.`; return; }
+      if (s.uploading > 0) { err.textContent = 'Зачекайте — зображення ще завантажується.'; return; }
       await withBusy(el, async () => {
         try {
-          const body = { subjectKey, lessonID: s.item.lessonID || null, text, due: due.toISOString() };
+          const body = { subjectKey, lessonID: s.item.lessonID || null, text, due: due.toISOString(), links: s.item.links, images: s.item.images };
           if (s.editing) await api('PATCH', '/api/homework/' + encodeURIComponent(s.item.id), body);
           else await api('POST', '/api/homework', body);
           if (s.item.lessonID) markAnswered(s.item.lessonID);
@@ -1277,6 +1440,11 @@
       if (el.dataset.key === 'notificationsEnabled' && el.checked && S.push.supported && !S.push.subscribed) enablePush();
     } else if (el.dataset.chg === 'notifyField') {
       S.notify[el.dataset.key] = el.value;
+    } else if (el.dataset.chg === 'hwImages' && el.files && el.files.length) {
+      const s = sheetOf(el);
+      const files = [...el.files];
+      el.value = '';
+      if (s) addImages(s, files);
     } else if (el.dataset.chg === 'schedFile' && el.files && el.files[0]) {
       const f = el.files[0];
       el.value = '';
