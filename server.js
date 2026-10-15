@@ -16,7 +16,7 @@ const webpush = require('web-push');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
-const DB_NAME = process.env.DB_NAME || 'diary';
+const DB_NAME = process.env.DB_NAME || 'navs';
 const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
