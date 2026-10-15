@@ -37,6 +37,7 @@
     pushEnsured: false,
     installEvent: null,
     needPassword: false,
+    deviceRequests: 0,
     schedMsg: { text: '', cls: 'muted' },
     notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
@@ -133,6 +134,7 @@
     S.subjects = r.subjects || {};
     S.teachers = r.teachers || {};
     S.scheduleTitle = r.scheduleTitle || '';
+    S.deviceRequests = r.deviceRequests || 0;
     const ids = new Set();
     S.homework = (r.homework || []).map((h) => {
       ids.add(h.id);
@@ -168,7 +170,11 @@
   }
 
   async function login(fullName, password) {
-    const r = await api('POST', '/api/auth/login', { fullName, deviceId, password: password || undefined });
+    const r = await api('POST', '/api/auth/login', {
+      fullName, deviceId, password: password || undefined,
+      deviceLabel: window.DeviceInfo ? DeviceInfo.label() : undefined,
+    });
+    stopPending();
     S.token = null;
     resetLocal();
     S.token = r.token;
@@ -176,6 +182,41 @@
     S.user = r.user;
     S.tab = 'today';
     await sync();
+  }
+
+  // Новий пристрій людини, в якої вже є інші: запит іде адміністратору, а ми чекаємо підтвердження.
+  let pendingTimer = null;
+  function stopPending() { clearInterval(pendingTimer); pendingTimer = null; }
+
+  function setLoginMsg(text, kind) {
+    const el = $('#loginErr');
+    if (!el) return;
+    if (kind === 'wait') {
+      el.className = '';
+      el.innerHTML = `<div class="info-box"><span class="spin"></span><div>${esc(text)}</div></div>`;
+    } else {
+      el.className = kind === 'err' ? 'err' : '';
+      el.textContent = text;
+    }
+  }
+
+  function startPending(name) {
+    stopPending();
+    pendingTimer = setInterval(async () => {
+      const f = $('#fullName');
+      if (S.user || !f || f.value.replace(/\s+/g, ' ').trim() !== name) { stopPending(); return; }
+      try {
+        const r = await api('POST', '/api/auth/device-status', { fullName: name, deviceId });
+        if (r.status === 'approved') {
+          stopPending();
+          setLoginMsg('Підтверджено! Входимо…', 'ok');
+          try { await login(name, ''); } catch (e) { setLoginMsg(e.message, 'err'); }
+        } else if (r.status === 'none') {
+          stopPending();
+          setLoginMsg('Адміністратор відхилив запит на цей пристрій. Можна надіслати його ще раз, натиснувши «Увійти».', 'err');
+        }
+      } catch (e) { /* немає зв’язку — спробуємо ще раз */ }
+    }, 6000);
   }
 
   let loginNotice = '';
@@ -392,7 +433,7 @@
     if (overdue.length) h += sec('Прострочено', overdue);
     if (later.length) h += sec('Пізніше', later);
     if (done.length) h += sec('Виконано', done);
-    return h + `<button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
+    return h + `<div class="fab-gap"></div><button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
   }
 
   function viewNotify() {
@@ -455,7 +496,7 @@
         <button class="row" data-act="moderation"><span>Домашнє на підтвердження</span>${q ? badge(String(q), 'warn') : ''}</button>
         <button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
         <button class="row" data-act="teachers"><span>Викладачі</span></button>
-        <button class="row" data-act="users"><span>Учасники й пристрої</span></button>
+        <button class="row" data-act="users"><span>Учасники й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>
       </div></div>`;
     }
 
@@ -504,7 +545,8 @@
     }
     const a = document.activeElement;
     if (S.tab === 'notify' && a && a.closest && a.closest('main') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не збиваємо введення
-    const y = window.scrollY;
+    const oldMain = $('main.content');
+    const y = oldMain ? oldMain.scrollTop : 0;
     const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, notify: viewNotify, settings: viewSettings };
     const tabs = visibleTabs();
     const cur = tabs.find((t) => t.id === S.tab) || tabs[0];
@@ -517,8 +559,9 @@
       <main class="content">${views[cur.id]()}</main>
       <nav class="tabbar"><div class="tabbar-in">${tabs.map((t) => `
         <button class="tab ${t.id === S.tab ? 'active' : ''}" data-act="tab" data-tab="${t.id}">${ic(t.icon, 22)}<span>${t.title}</span>
-          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}</button>`).join('')}</div></nav>`;
-    window.scrollTo(0, y);
+          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}${t.id === 'settings' && isAdmin() && S.deviceRequests ? `<span class="dot">${S.deviceRequests}</span>` : ''}</button>`).join('')}</div></nav>`;
+    const newMain = $('main.content');
+    if (newMain) newMain.scrollTop = y;
     refreshSheets();
   }
 
@@ -534,7 +577,7 @@
             <span class="label">Пароль адміністратора</span>
             <input class="field" id="adminPass" type="password" autocomplete="current-password" placeholder="Потрібен для нового пристрою">
           </div>
-          <div class="muted small">Під цим ПІБ вас бачитиме адміністратор. Його закріплено за цим пристроєм.</div>
+          <div class="muted small">Під цим ПІБ вас бачитиме адміністратор. На новому пристрої він має підтвердити вхід — запит піде йому автоматично.</div>
         </div>
         <div id="loginErr" class="err" style="margin:12px 0;text-align:center">${esc(loginNotice)}</div>
         <button class="btn" id="loginBtn" type="submit">Увійти</button>
@@ -717,17 +760,28 @@
     });
   }
 
+  const fWhen = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? `${dayMonth(d)}, ${hm(d)}` : ''; };
+
   function openUsers() {
-    const s = { auto: false, title: 'Учасники', users: null, err: '' };
+    const s = { auto: false, title: 'Учасники й пристрої', users: null, err: '' };
     s.render = () => {
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
-      return '<div class="muted small">Якщо людина втратила телефон чи перевстановила застосунок — натисніть «Відв’язати пристрій», і вона зможе увійти знову.</div>' +
-        s.users.map((u) => card(`
+      const list = [...s.users].sort((a, b) => (b.pending.length > 0) - (a.pending.length > 0) || a.fullName.localeCompare(b.fullName, 'uk'));
+      return '<div class="muted small">Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
+        list.map((u) => card(`
           <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${u.isAdmin ? badge('АДМІН', 'accent') : ''}</div>
-          <div class="muted small">Пристроїв: ${u.devices}</div>
-          <div class="btn-row"><button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати пристрій</button>
-            ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити</button>` : ''}</div>`)).join('');
+          ${u.pending.length ? `<div class="label" style="color:var(--warn)">Запити на новий пристрій</div>` + u.pending.map((p) => `
+            <div class="dev"><div class="dn">${esc(p.label)}<div class="muted small">${esc(fWhen(p.requestedAt))}</div></div>
+              <div style="display:flex;gap:6px"><button class="btn green small" data-act="devApprove" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Підтвердити</button>
+              <button class="btn red small" data-act="devReject" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Ні</button></div></div>`).join('') : ''}
+          <div class="label">Пристрої (${u.devices})</div>
+          ${u.deviceList.length ? u.deviceList.map((d) => `
+            <div class="dev"><div class="dn">${esc(d.label)}${d.addedAt ? `<div class="muted small">додано ${esc(fWhen(d.addedAt))}</div>` : ''}</div>
+              <button class="btn deep small" data-act="devRemove" data-user="${esc(u.id)}" data-key="${esc(d.key)}" data-name="${esc(u.fullName)}">Видалити</button></div>`).join('')
+            : '<div class="muted small">Немає — перший пристрій, з якого людина увійде, стане основним.</div>'}
+          <div class="btn-row">${u.devices > 1 ? `<button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати всі</button>` : ''}
+            ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити людину</button>` : ''}</div>`, u.pending.length ? 'pending-box' : '')).join('');
     };
     s.reload = async () => {
       try { s.users = await api('GET', '/api/admin/users'); s.err = ''; } catch (e) { s.err = e.message; }
@@ -765,12 +819,29 @@
     if (S.user && S.tab === 'settings') render();
   }
 
-  async function subscribePush() {
+  /** Чи підписку створено з поточним ключем сервера. Після зміни ключів стара підписка отримує від Apple 403. */
+  function sameKey(sub, publicKey) {
+    try {
+      const k = sub.options && sub.options.applicationServerKey;
+      if (!k) return true; // перевірити неможливо
+      const a = new Uint8Array(k);
+      const b = b64ToU8(publicKey);
+      return a.length === b.length && a.every((v, i) => v === b[i]);
+    } catch (e) { return true; }
+  }
+
+  async function subscribePush(force) {
     const reg = await navigator.serviceWorker.ready;
     const cfg = await api('GET', '/api/push/config');
     let sub = await reg.pushManager.getSubscription();
+    if (sub && (force || !sameKey(sub, cfg.publicKey))) {
+      // Стара/зламана підписка — прибираємо й створюємо нову з актуальним ключем.
+      await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToU8(cfg.publicKey) });
-    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), settings: pushSettings() });
+    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), settings: pushSettings(), key: cfg.publicKey });
     return sub;
   }
 
@@ -919,7 +990,7 @@
   }
 
   const ACT = {
-    tab(el) { S.tab = el.dataset.tab; window.scrollTo(0, 0); render(); if (S.tab === 'notify') loadNotifyUsers(); },
+    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); },
     sync() { sync(); },
     lesson(el) { openLesson(el.dataset.id); },
     day(el) { S.day = sod(new Date(+el.dataset.ts)); render(); },
@@ -1016,10 +1087,16 @@
       });
     },
 
+    async devApprove(el) { await deviceAction(el, 'POST', 'approve', 'Пристрій підтверджено — вхід відбудеться автоматично'); },
+    async devReject(el) { await deviceAction(el, 'POST', 'reject', 'Запит відхилено'); },
+    async devRemove(el) {
+      if (!confirm(`Видалити цей пристрій у «${el.dataset.name}»? З нього треба буде входити знову.`)) return;
+      await deviceAction(el, 'DELETE', '', 'Пристрій видалено');
+    },
     async resetDevices(el) {
       const s = sheetOf(el);
-      if (!confirm('Відв’язати пристрій цього користувача?')) return;
-      try { await api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.id)}/reset-devices`); toast('Пристрій відв’язано'); } catch (e) { toast(e.message); }
+      if (!confirm('Відв’язати ВСІ пристрої цього користувача? Перший, хто увійде під його ПІБ, стане новим основним.')) return;
+      try { await api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.id)}/reset-devices`); toast('Усі пристрої відв’язано'); } catch (e) { toast(e.message); }
       if (s && s.reload) s.reload();
     },
     async deleteUser(el) {
@@ -1051,13 +1128,24 @@
     pushOff() { disablePush(); },
     async pushTest(el) {
       await withBusy(el, async () => {
-        try {
+        const run = async () => {
           const sub = await getSub();
           if (!sub) throw new Error('Спершу увімкніть сповіщення.');
           await api('PUT', '/api/push/settings', { endpoint: sub.endpoint, settings: pushSettings() });
           await api('POST', '/api/push/test', { endpoint: sub.endpoint });
+        };
+        try {
+          try {
+            await run();
+          } catch (e) {
+            // Підписки немає на сервері або її відхилив push-сервіс (403) — створюємо заново й пробуємо ще раз.
+            if (e.status === 404 || e.code === 'push_rejected') { await subscribePush(true); await run(); } else throw e;
+          }
           toast('Тест надіслано — сповіщення має прийти за кілька секунд.');
-        } catch (e) { toast(e.message); }
+        } catch (e) {
+          toast(e.code === 'push_rejected' ? e.message + ' Перевірте VAPID_SUBJECT на сервері (має бути реальна пошта).' : e.message);
+        }
+        refreshPushState();
       });
     },
     async share() {
@@ -1075,6 +1163,19 @@
     },
     logout() { if (confirm('Вийти з акаунта? Дані на цьому пристрої буде видалено, на сервері вони лишаться.')) signOut(); },
   };
+
+  async function deviceAction(el, method, action, okText) {
+    const s = sheetOf(el);
+    await withBusy(el, async () => {
+      try {
+        const path = `/api/admin/users/${encodeURIComponent(el.dataset.user)}/devices/${encodeURIComponent(el.dataset.key)}${action ? '/' + action : ''}`;
+        await api(method, path);
+        toast(okText);
+      } catch (e) { toast(e.message); }
+    });
+    if (s && s.reload) await s.reload();
+    sync();
+  }
 
   async function moderate(el, what) {
     await withBusy(el, async () => {
@@ -1126,6 +1227,7 @@
     btn.innerHTML = '<span class="spin"></span>';
     try {
       loginNotice = '';
+      stopPending();
       await login(name, $('#adminPass') ? $('#adminPass').value : '');
     } catch (ex) {
       if (!S.user) {
@@ -1134,7 +1236,12 @@
           const w = $('#passWrap');
           if (w) { w.hidden = false; w.style.display = 'flex'; }
         }
-        err.textContent = ex.message;
+        if (ex.code === 'device_pending') {
+          setLoginMsg(ex.message, 'wait');
+          startPending(name);
+        } else {
+          setLoginMsg(ex.message, 'err');
+        }
         btn.disabled = false;
         btn.textContent = 'Увійти';
       }
@@ -1158,6 +1265,7 @@
     if (p.has('lesson')) openLesson(p.get('lesson'), { join: p.get('join') === '1' });
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
     else if (p.has('answered')) { markAnswered(p.get('answered')); toast('Добре, відмітили'); render(); }
+    else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
     else if (p.get('tab') === 'moderation') { if (isAdmin()) { S.tab = 'homework'; render(); openModeration(); } }
     else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
   }

@@ -19,11 +19,23 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.DB_NAME || 'navs';
 const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
+const MAX_DEVICES = parseInt(process.env.MAX_DEVICES, 10) || 5; // скільки пристроїв може мати одна людина
+
+// Apple відхиляє підписи сповіщень (403 BadJwtToken), якщо «sub» фіктивний (example.com, you@…).
+// Тому підставну адресу замінюємо на https-адресу самого сервісу, а в логах просимо вказати реальну.
+function resolveVapidSubject() {
+  const raw = (process.env.VAPID_SUBJECT || '').trim();
+  const fake = !raw || /example\.(com|org|net)|localhost|@you\b|you@/i.test(raw);
+  if (!fake) return raw;
+  const self = process.env.RENDER_EXTERNAL_URL;
+  console.warn('VAPID_SUBJECT не задано або фіктивний — вкажіть реальну пошту (mailto:ви@gmail.com). iOS інакше відповідає 403.');
+  if (self && /^https:\/\//.test(self)) return self;
+  return raw || 'mailto:admin@example.com';
+}
+const VAPID_SUBJECT = resolveVapidSubject();
 const TICK_MS = parseInt(process.env.SCHEDULER_INTERVAL_MS, 10) || 30000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY = 5 * 1024 * 1024;
-const MAX_ADMIN_DEVICES = 5;
 
 const normName = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const normKey = (s) => normName(s).toLocaleLowerCase('uk');
@@ -92,6 +104,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config;
 let SECRET;
+let VAPID_KEY_ID = '';
 
 async function getConfig(key, make) {
   const doc = await config.findOne({ _id: key });
@@ -135,6 +148,7 @@ async function initDb() {
     vapid = await getConfig('vapid', () => webpush.generateVAPIDKeys());
   }
   webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
+  VAPID_KEY_ID = sha(vapid.publicKey);
   return vapid.publicKey;
 }
 
@@ -186,20 +200,30 @@ const pubHw = (h) => ({
 
 // ───────────────────────── Push ─────────────────────────
 
+/**
+ * Повертає { ok, status, body }. Підписки, яких push-сервіс уже не приймає (404/410), видаляємо.
+ * 403/401 зазвичай означає, що підписку створено з ІНШИМ VAPID-ключем (ключі перегенерувалися) —
+ * така підписка нікому не потрібна, видаляємо її, а клієнт сам створить нову.
+ */
 async function sendPush(sub, payload) {
   try {
     await webpush.sendNotification(sub.subscription, JSON.stringify(payload), {
       TTL: payload.ttl || 600,
       urgency: 'high',
     });
-    return true;
+    return { ok: true };
   } catch (e) {
-    if (e && (e.statusCode === 404 || e.statusCode === 410)) {
+    const status = (e && e.statusCode) || 0;
+    const body = e && e.body ? String(e.body).slice(0, 200) : '';
+    if (status === 404 || status === 410) {
       await pushSubs.deleteOne({ _id: sub._id }).catch(() => {});
+    } else if ((status === 401 || status === 403) && sub.vapidKey !== VAPID_KEY_ID) {
+      await pushSubs.deleteOne({ _id: sub._id }).catch(() => {});
+      console.error(`push ${status}: підписка зі старим VAPID-ключем видалена`, body);
     } else {
-      console.error('push error:', (e && (e.statusCode || e.message)) || e);
+      console.error('push error:', status || (e && e.message) || e, body);
     }
-    return false;
+    return { ok: false, status, body };
   }
 }
 
@@ -323,6 +347,57 @@ async function notifyPending(hw) {
   }
 }
 
+async function notifyDeviceRequest(user, label) {
+  try {
+    const admins = await users.find({ isAdmin: true }).toArray();
+    const ids = new Set(admins.map((a) => a._id));
+    const subs = (await pushSubs.find({}).toArray()).filter((s) => ids.has(s.userId));
+    const payload = {
+      title: 'Запит на новий пристрій',
+      body: `${user.fullName} хоче увійти з нового пристрою${label ? ' (' + label + ')' : ''}`,
+      tag: 'device-' + user._id,
+      data: { url: '/?tab=users' },
+      ttl: 3600,
+    };
+    await Promise.allSettled(subs.map((s) => sendPush(s, payload)));
+  } catch (e) {
+    console.error('notifyDeviceRequest:', e);
+  }
+}
+
+// ───────────────────────── Пристрої ─────────────────────────
+
+const devKey = (deviceId) => sha('dev|' + deviceId);
+
+function devLabel(body, req) {
+  const given = str(body.deviceLabel, 80);
+  if (given) return given;
+  const ua = String(req.headers['user-agent'] || '');
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android'
+    : /Windows/.test(ua) ? 'Windows' : /Mac OS X/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Пристрій';
+  const br = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome|CriOS/.test(ua) ? 'Chrome'
+    : /Firefox|FxiOS/.test(ua) ? 'Firefox' : /Safari/.test(ua) ? 'Safari' : '';
+  return br ? `${os} · ${br}` : os;
+}
+
+/** Старі записи могли не мати deviceIds / deviceMeta — приводимо до єдиного вигляду. */
+function normDevices(user) {
+  if (!Array.isArray(user.deviceIds)) user.deviceIds = user.deviceId ? [String(user.deviceId)] : [];
+  if (!user.deviceMeta || typeof user.deviceMeta !== 'object') user.deviceMeta = {};
+  if (!Array.isArray(user.pendingDevices)) user.pendingDevices = [];
+  return user;
+}
+
+async function addDevice(user, deviceId, label) {
+  normDevices(user);
+  if (!user.deviceIds.includes(deviceId)) user.deviceIds.push(deviceId);
+  user.deviceMeta[devKey(deviceId)] = { label, addedAt: new Date() };
+  user.pendingDevices = user.pendingDevices.filter((p) => p.deviceId !== deviceId);
+  await users.updateOne({ _id: user._id }, {
+    $set: { deviceIds: user.deviceIds, deviceMeta: user.deviceMeta, pendingDevices: user.pendingDevices },
+  });
+}
+
 // ───────────────────────── Маршрути ─────────────────────────
 
 const routes = [];
@@ -337,7 +412,7 @@ const ok = () => ({});
 let VAPID_PUBLIC = '';
 
 // — вхід
-route('POST', '/api/auth/login', async ({ body, ip }) => {
+route('POST', '/api/auth/login', async ({ body, ip, req }) => {
   rateLimit(ip);
   const fullName = normName(body.fullName);
   const deviceId = str(body.deviceId, 100);
@@ -348,10 +423,14 @@ route('POST', '/api/auth/login', async ({ body, ip }) => {
   const nameKey = normKey(fullName);
   const adminByName = ADMIN_NAMES.has(nameKey);
 
+  const label = devLabel(body, req);
   let user = await users.findOne({ nameKey });
   if (!user) {
     const isAdmin = adminByName || (ADMIN_NAMES.size === 0 && (await users.countDocuments({})) === 0);
-    user = { _id: crypto.randomUUID(), fullName, nameKey, isAdmin, deviceIds: [deviceId], createdAt: new Date() };
+    user = {
+      _id: crypto.randomUUID(), fullName, nameKey, isAdmin, deviceIds: [deviceId],
+      deviceMeta: { [devKey(deviceId)]: { label, addedAt: new Date() } }, pendingDevices: [], createdAt: new Date(),
+    };
     try {
       await users.insertOne(user);
     } catch (e) {
@@ -363,37 +442,58 @@ route('POST', '/api/auth/login', async ({ body, ip }) => {
       user.isAdmin = true;
       await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
     }
-    // Записи, створені старим сервером, можуть не мати deviceIds — підтримуємо й поле deviceId.
-    if (!Array.isArray(user.deviceIds)) user.deviceIds = user.deviceId ? [String(user.deviceId)] : [];
+    normDevices(user);
     if (!user.deviceIds.includes(deviceId)) {
       if (user.deviceIds.length === 0) {
         // Адміністратор відв'язав усі пристрої — перший, хто увійде, стає новим.
-        user.deviceIds = [deviceId];
-        await users.updateOne({ _id: user._id }, { $set: { deviceIds: user.deviceIds } });
-      } else if (user.isAdmin && ADMIN_PASSWORD) {
-        const pass = String(body.password || '');
-        if (!pass) throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
-        if (!safeEq(pass, ADMIN_PASSWORD)) throw new HttpError(403, 'Невірний пароль.', { code: 'password_required' });
-        const devices = [...user.deviceIds, deviceId].slice(-MAX_ADMIN_DEVICES);
-        await users.updateOne({ _id: user._id }, { $set: { deviceIds: devices } });
-        user.deviceIds = devices;
+        await addDevice(user, deviceId, label);
+      } else if (user.isAdmin && ADMIN_PASSWORD && body.password) {
+        // Адміністратор може додати пристрій сам — паролем.
+        if (!safeEq(String(body.password), ADMIN_PASSWORD)) throw new HttpError(403, 'Невірний пароль.', { code: 'password_required' });
+        await addDevice(user, deviceId, label);
+      } else if (user.isAdmin && ADMIN_PASSWORD && !body.password && !user.pendingDevices.some((p) => p.deviceId === deviceId)) {
+        throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
       } else {
-        throw new HttpError(403, 'Цей ПІБ уже закріплено за іншим пристроєм. Попросіть адміністратора відв’язати його.', { code: 'device_bound' });
+        // Новий пристрій людини, яка вже має інші: не відмовляємо, а надсилаємо запит адміністратору.
+        const already = user.pendingDevices.some((p) => p.deviceId === deviceId);
+        if (!already) {
+          if (user.deviceIds.length >= MAX_DEVICES) {
+            throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
+          }
+          const entry = { key: devKey(deviceId), deviceId, label, requestedAt: new Date() };
+          user.pendingDevices = [...user.pendingDevices.slice(-4), entry];
+          await users.updateOne({ _id: user._id }, { $set: { pendingDevices: user.pendingDevices } });
+          notifyDeviceRequest(user, label);
+        }
+        throw new HttpError(403, 'Запит на додавання пристрою надіслано адміністратору. Щойно він підтвердить — вхід відбудеться автоматично.', { code: 'device_pending' });
       }
     }
   }
   return { token: signToken(user._id), user: pubUser(user) };
 }, { auth: false });
 
+// — стан запиту на новий пристрій (клієнт опитує його, поки адміністратор не підтвердить)
+route('POST', '/api/auth/device-status', async ({ body, ip }) => {
+  rateLimit('ds|' + ip, 400);
+  const deviceId = str(body.deviceId, 100);
+  const user = await users.findOne({ nameKey: normKey(body.fullName) });
+  if (!user || !deviceId) return { status: 'none' };
+  normDevices(user);
+  if (user.deviceIds.includes(deviceId)) return { status: 'approved' };
+  if (user.pendingDevices.some((p) => p.deviceId === deviceId)) return { status: 'pending' };
+  return { status: 'none' };
+}, { auth: false });
+
 // — синхронізація
 route('GET', '/api/sync', async ({ user }) => {
   const since = new Date(Date.now() - 60 * 24 * 3600 * 1000);
-  const [ls, subs, tchs, hws, title] = await Promise.all([
+  const [ls, subs, tchs, hws, title, reqUsers] = await Promise.all([
     lessons.find({}).sort({ start: 1 }).toArray(),
     subjects.find({}).toArray(),
     teachers.find({}).toArray(),
     homework.find({ due: { $gte: since } }).sort({ due: 1 }).toArray(),
     config.findOne({ _id: 'scheduleTitle' }),
+    user.isAdmin ? users.find({ 'pendingDevices.0': { $exists: true } }).toArray() : [],
   ]);
   const subjectMap = {};
   for (const s of subs) subjectMap[s._id] = { fullName: s.fullName || '', link: s.link || '' };
@@ -403,6 +503,7 @@ route('GET', '/api/sync', async ({ user }) => {
   return {
     user: pubUser(user),
     scheduleTitle: (title && title.value) || '',
+    deviceRequests: reqUsers.reduce((n, u) => n + u.pendingDevices.length, 0),
     lessons: ls.map(pubLesson),
     subjects: subjectMap,
     teachers: teacherMap,
@@ -532,6 +633,8 @@ route('POST', '/api/push/subscribe', async ({ body, user, req }) => {
         userId: user._id,
         subscription: { endpoint: s.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } },
         settings: cleanSettings(body.settings),
+        // З яким ключем створено підписку — щоб відрізняти застарілі після зміни VAPID-ключів.
+        vapidKey: body.key && sha(String(body.key)) === VAPID_KEY_ID ? VAPID_KEY_ID : '',
         userAgent: str(req.headers['user-agent'], 200),
         updatedAt: new Date(),
       },
@@ -563,8 +666,10 @@ route('POST', '/api/push/test', async ({ body, user }) => {
   const payload = next.length
     ? { ...startPayload(next[0], names, Math.max(now, next[0].start.getTime() - 120000)), tag: 'test' }
     : { title: 'Тестове сповіщення', body: 'Сповіщення працюють.', tag: 'test', data: { url: '/' } };
-  const delivered = await sendPush(sub, payload);
-  if (!delivered) throw new HttpError(502, 'Не вдалося надіслати сповіщення. Вимкніть і ввімкніть їх знову.');
+  const r = await sendPush(sub, payload);
+  if (!r.ok) {
+    throw new HttpError(502, `Push-сервіс відхилив сповіщення (${r.status || 'немає відповіді'}).`, { code: 'push_rejected', status: r.status });
+  }
   return ok();
 });
 
@@ -574,10 +679,18 @@ route('GET', '/api/admin/users', async () => {
   const subs = await pushSubs.find({}).toArray();
   const pushCount = {};
   for (const sb of subs) pushCount[sb.userId] = (pushCount[sb.userId] || 0) + 1;
-  return list.map((u) => ({
-    id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin,
-    devices: (u.deviceIds || []).length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
-  }));
+  return list.map((u) => {
+    normDevices(u);
+    return {
+      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin,
+      devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
+      deviceList: u.deviceIds.map((id, i) => {
+        const m = u.deviceMeta[devKey(id)] || {};
+        return { key: devKey(id), label: m.label || `Пристрій ${i + 1}`, addedAt: m.addedAt || null };
+      }),
+      pending: u.pendingDevices.map((p) => ({ key: p.key || devKey(p.deviceId), label: p.label || 'Пристрій', requestedAt: p.requestedAt })),
+    };
+  });
 }, { admin: true });
 
 // Ручне сповіщення від адміністратора: одному користувачеві або всім (userId: "all").
@@ -598,13 +711,47 @@ route('POST', '/api/admin/notify', async ({ body }) => {
   }
   const payload = { title, body: text, tag: 'admin-' + Date.now(), data: { url: '/' }, ttl: 3600 };
   const results = await Promise.all(subs.map((x) => sendPush(x, payload)));
-  const sent = results.filter(Boolean).length;
+  const sent = results.filter((r) => r.ok).length;
   if (!sent) throw new HttpError(502, 'Не вдалося доставити сповіщення: підписки застарілі. Користувачам треба ввімкнути їх знову.');
   return { sent, total: subs.length };
 }, { admin: true });
 
+route('POST', '/api/admin/users/:id/devices/:key/approve', async ({ params }) => {
+  const user = await users.findOne({ _id: params.id });
+  if (!user) throw new HttpError(404, 'Користувача не знайдено.');
+  normDevices(user);
+  const req = user.pendingDevices.find((p) => (p.key || devKey(p.deviceId)) === params.key);
+  if (!req) throw new HttpError(404, 'Запит уже оброблено.');
+  if (user.deviceIds.length >= MAX_DEVICES) {
+    throw new HttpError(400, `Уже прив’язано максимум пристроїв (${MAX_DEVICES}). Спершу видаліть непотрібний.`);
+  }
+  await addDevice(user, req.deviceId, req.label || 'Пристрій');
+  return ok();
+}, { admin: true });
+
+route('POST', '/api/admin/users/:id/devices/:key/reject', async ({ params }) => {
+  const user = await users.findOne({ _id: params.id });
+  if (!user) throw new HttpError(404, 'Користувача не знайдено.');
+  normDevices(user);
+  const left = user.pendingDevices.filter((p) => (p.key || devKey(p.deviceId)) !== params.key);
+  await users.updateOne({ _id: user._id }, { $set: { pendingDevices: left } });
+  return ok();
+}, { admin: true });
+
+route('DELETE', '/api/admin/users/:id/devices/:key', async ({ params }) => {
+  const user = await users.findOne({ _id: params.id });
+  if (!user) throw new HttpError(404, 'Користувача не знайдено.');
+  normDevices(user);
+  const gone = user.deviceIds.find((id) => devKey(id) === params.key);
+  if (!gone) throw new HttpError(404, 'Пристрій не знайдено.');
+  const meta = { ...user.deviceMeta };
+  delete meta[params.key];
+  await users.updateOne({ _id: user._id }, { $set: { deviceIds: user.deviceIds.filter((id) => id !== gone), deviceMeta: meta } });
+  return ok();
+}, { admin: true });
+
 route('POST', '/api/admin/users/:id/reset-devices', async ({ params }) => {
-  const res = await users.updateOne({ _id: params.id }, { $set: { deviceIds: [] } });
+  const res = await users.updateOne({ _id: params.id }, { $set: { deviceIds: [], deviceMeta: {}, pendingDevices: [] } });
   if (!res.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
   return ok();
 }, { admin: true });
