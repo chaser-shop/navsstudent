@@ -38,6 +38,7 @@
     installEvent: null,
     needPassword: false,
     deviceRequests: 0,
+    noHw: new Set(),
     schedMsg: { text: '', cls: 'muted' },
     notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
@@ -135,6 +136,7 @@
     S.teachers = r.teachers || {};
     S.scheduleTitle = r.scheduleTitle || '';
     S.deviceRequests = r.deviceRequests || 0;
+    S.noHw = new Set(r.noHomework || []);
     const ids = new Set();
     S.homework = (r.homework || []).map((h) => {
       ids.add(h.id);
@@ -281,7 +283,23 @@
   function pendingPrompts() {
     const now = new Date();
     const from = new Date(now.getTime() - 24 * 3600 * 1000);
-    return S.lessons.filter((l) => l.end <= now && l.end > from && !S.answered.has(l.id)).sort((a, b) => b.end - a.end);
+    return S.lessons.filter((l) => l.end <= now && l.end > from && !S.answered.has(l.id) && !S.noHw.has(l.id) && !hasHomeworkFor(l))
+      .sort((a, b) => b.end - a.end);
+  }
+
+  /** Домашнє з цієї пари вже записано (прив’язане до пари або внесене з цього предмета після її початку). */
+  function hasHomeworkFor(l) {
+    return S.homework.some((h) => h.status !== 'rejected' && (h.lessonID === l.id || (h.subjectKey === l.subjectKey && h.created >= l.start)));
+  }
+
+  /** «Нічого не задали»: у адміністратора плашка зникає в усіх, у решти — лише на їхньому пристрої. */
+  async function answerNone(lessonId) {
+    markAnswered(lessonId);
+    if (isAdmin()) {
+      S.noHw.add(lessonId);
+      try { await api('POST', `/api/lessons/${encodeURIComponent(lessonId)}/no-homework`); } catch (e) { toast(e.message); S.noHw.delete(lessonId); }
+    }
+    render();
   }
 
   function markAnswered(id) { S.answered.add(id); LS.set('answered', [...S.answered]); }
@@ -997,7 +1015,7 @@
     shift(el) { S.day = addDays(S.day, +el.dataset.d); render(); },
     goToday() { S.day = sod(new Date()); render(); },
     done(el) { toggleDone(el.dataset.id); render(); },
-    answered(el) { markAnswered(el.dataset.lesson); render(); },
+    answered(el) { answerNone(el.dataset.lesson); },
     hintOff() { LS.set('hintOff', true); render(); },
     moderation() { openModeration(); },
     subjects() { openSubjects(); },
@@ -1013,7 +1031,7 @@
       const h = S.homework.find((x) => x.id === el.dataset.id);
       if (h && canEdit(h)) openHomeworkForm(Object.assign({}, h));
     },
-    hwNone(el) { markAnswered(el.dataset.lesson); closeSheet(); render(); },
+    hwNone(el) { closeSheet(); answerNone(el.dataset.lesson); },
 
     async hwSave(el) {
       const s = sheetOf(el);
@@ -1264,7 +1282,7 @@
 
     if (p.has('lesson')) openLesson(p.get('lesson'), { join: p.get('join') === '1' });
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
-    else if (p.has('answered')) { markAnswered(p.get('answered')); toast('Добре, відмітили'); render(); }
+    else if (p.has('answered')) { answerNone(p.get('answered')); toast('Добре, відмітили'); }
     else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
     else if (p.get('tab') === 'moderation') { if (isAdmin()) { S.tab = 'homework'; render(); openModeration(); } }
     else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }

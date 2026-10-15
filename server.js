@@ -102,7 +102,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 // ───────────────────────── База даних ─────────────────────────
 
-let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config;
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw;
 let SECRET;
 let VAPID_KEY_ID = '';
 
@@ -131,12 +131,14 @@ async function initDb() {
   pushSubs = db.collection('pushSubs');
   sent = db.collection('sentNotifications');
   config = db.collection('config');
+  noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
   await lessons.createIndex({ start: 1 });
   await lessons.createIndex({ end: 1 });
   await homework.createIndex({ due: 1 });
   await pushSubs.createIndex({ userId: 1 });
+  await noHw.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await sent.createIndex({ at: 1 }, { expireAfterSeconds: 3 * 24 * 3600 });
 
   SECRET = process.env.JWT_SECRET || (await getConfig('jwtSecret', () => crypto.randomBytes(32).toString('hex')));
@@ -287,6 +289,7 @@ async function tick() {
     const ended = await lessons.find({ end: { $gt: new Date(now - 20 * 60000), $lte: new Date(now) } }).toArray();
     if (!starting.length && !ended.length) return;
     const names = await subjectNames();
+    const noHwIds = new Set(ended.length ? (await noHw.find({ _id: { $in: ended.map((l) => l._id) } }).toArray()).map((x) => x._id) : []);
 
     await Promise.allSettled(subs.map(async (sub) => {
       const lead = clampInt(sub.settings && sub.settings.leadMinutes, 1, 15, 2) * 60000;
@@ -297,6 +300,7 @@ async function tick() {
       }
       if (sub.settings && sub.settings.askHomework === false) return;
       for (const l of ended) {
+        if (noHwIds.has(l._id)) continue; // адмін уже відмітив «нічого не задали»
         if (!(await claim(`e|${sub._id}|${l._id}`))) continue;
         await sendPush(sub, endPayload(l, names));
       }
@@ -489,13 +493,14 @@ route('POST', '/api/auth/device-status', async ({ body, ip }) => {
 // — синхронізація
 route('GET', '/api/sync', async ({ user }) => {
   const since = new Date(Date.now() - 60 * 24 * 3600 * 1000);
-  const [ls, subs, tchs, hws, title, reqUsers] = await Promise.all([
+  const [ls, subs, tchs, hws, title, reqUsers, noHws] = await Promise.all([
     lessons.find({}).sort({ start: 1 }).toArray(),
     subjects.find({}).toArray(),
     teachers.find({}).toArray(),
     homework.find({ due: { $gte: since } }).sort({ due: 1 }).toArray(),
     config.findOne({ _id: 'scheduleTitle' }),
     user.isAdmin ? users.find({ 'pendingDevices.0': { $exists: true } }).toArray() : [],
+    noHw.find({}).toArray(),
   ]);
   const subjectMap = {};
   for (const s of subs) subjectMap[s._id] = { fullName: s.fullName || '', link: s.link || '' };
@@ -505,6 +510,7 @@ route('GET', '/api/sync', async ({ user }) => {
   return {
     user: pubUser(user),
     scheduleTitle: (title && title.value) || '',
+    noHomework: noHws.map((x) => x._id),
     deviceRequests: reqUsers.reduce((n, u) => n + u.pendingDevices.length, 0),
     lessons: ls.map(pubLesson),
     subjects: subjectMap,
@@ -538,6 +544,14 @@ route('PUT', '/api/schedule', async ({ body }) => {
   await lessons.deleteMany({ _id: { $in: docs.map((d) => d._id) } });
   await lessons.insertMany(docs);
   await config.updateOne({ _id: 'scheduleTitle' }, { $set: { value: str(body.title, 300) } }, { upsert: true });
+  return ok();
+}, { admin: true });
+
+// — «нічого не задали» (адмін): плашка «Що задали?» зникає в усіх
+route('POST', '/api/lessons/:id/no-homework', async ({ params }) => {
+  const l = await lessons.findOne({ _id: params.id });
+  if (!l) throw new HttpError(404, 'Пару не знайдено.');
+  await noHw.updateOne({ _id: l._id }, { $set: { at: new Date() } }, { upsert: true });
   return ok();
 }, { admin: true });
 
