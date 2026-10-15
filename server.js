@@ -363,6 +363,7 @@ route('POST', '/api/auth/login', async ({ body, ip }) => {
       user.isAdmin = true;
       await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
     }
+    // Записи, створені старим сервером, можуть не мати deviceIds — підтримуємо й поле deviceId.
     if (!Array.isArray(user.deviceIds)) user.deviceIds = user.deviceId ? [String(user.deviceId)] : [];
     if (!user.deviceIds.includes(deviceId)) {
       if (user.deviceIds.length === 0) {
@@ -570,7 +571,36 @@ route('POST', '/api/push/test', async ({ body, user }) => {
 // — учасники (адмін)
 route('GET', '/api/admin/users', async () => {
   const list = await users.find({}).sort({ fullName: 1 }).toArray();
-  return list.map((u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, devices: (u.deviceIds || []).length, createdAt: u.createdAt }));
+  const subs = await pushSubs.find({}).toArray();
+  const pushCount = {};
+  for (const sb of subs) pushCount[sb.userId] = (pushCount[sb.userId] || 0) + 1;
+  return list.map((u) => ({
+    id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin,
+    devices: (u.deviceIds || []).length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
+  }));
+}, { admin: true });
+
+// Ручне сповіщення від адміністратора: одному користувачеві або всім (userId: "all").
+// Надсилається незалежно від налаштувань нагадувань — потрібна лише підписка на сповіщення.
+route('POST', '/api/admin/notify', async ({ body }) => {
+  const title = str(body.title, 60) || 'Повідомлення від адміністратора';
+  const text = str(body.body, 300);
+  if (!text) throw new HttpError(400, 'Введіть текст сповіщення.');
+  const toAll = !body.userId || body.userId === 'all';
+  let subs = await pushSubs.find({}).toArray();
+  if (!toAll) {
+    const target = await users.findOne({ _id: str(body.userId, 64) });
+    if (!target) throw new HttpError(404, 'Користувача не знайдено.');
+    subs = subs.filter((x) => x.userId === target._id);
+    if (!subs.length) throw new HttpError(404, 'У цього користувача не ввімкнені сповіщення на жодному пристрої.');
+  } else if (!subs.length) {
+    throw new HttpError(404, 'Ні в кого ще не ввімкнені сповіщення.');
+  }
+  const payload = { title, body: text, tag: 'admin-' + Date.now(), data: { url: '/' }, ttl: 3600 };
+  const results = await Promise.all(subs.map((x) => sendPush(x, payload)));
+  const sent = results.filter(Boolean).length;
+  if (!sent) throw new HttpError(502, 'Не вдалося доставити сповіщення: підписки застарілі. Користувачам треба ввімкнути їх знову.');
+  return { sent, total: subs.length };
 }, { admin: true });
 
 route('POST', '/api/admin/users/:id/reset-devices', async ({ params }) => {

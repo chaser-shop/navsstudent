@@ -50,7 +50,7 @@ svg { display: block; flex: none; }
   background: var(--deep); border-top: 1px solid var(--line); padding-bottom: var(--sab);
 }
 .tabbar-in { display: flex; width: 100%; max-width: 640px; }
-.tab { flex: 1; height: var(--tab-h); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--muted); font-size: 10.5px; position: relative; text-align: center; }
+.tab { flex: 1; height: var(--tab-h); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--muted); font-size: 10px; position: relative; text-align: center; }
 .tab.active { color: var(--accent); }
 .tab .dot { position: absolute; top: 6px; left: 50%; margin-left: 8px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--warn); color: #000; font-size: 10px; font-weight: 700; display: grid; place-items: center; }
 

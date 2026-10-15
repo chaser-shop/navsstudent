@@ -38,6 +38,7 @@
     installEvent: null,
     needPassword: false,
     schedMsg: { text: '', cls: 'muted' },
+    notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
 
   // ───────────── дати ─────────────
@@ -71,6 +72,7 @@
   const ICONS = {
     bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
     calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+    bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
     book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
     video: '<path d="M23 7l-7 5 7 5z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
@@ -393,6 +395,31 @@
     return h + `<button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
   }
 
+  function viewNotify() {
+    const n = S.notify;
+    const opts = [`<option value="all" ${n.userId === 'all' ? 'selected' : ''}>Усім, хто увімкнув сповіщення</option>`]
+      .concat((n.users || []).map((u) => `<option value="${esc(u.id)}" ${n.userId === u.id ? 'selected' : ''}>${esc(u.fullName)} ${u.pushDevices ? '🔔' + u.pushDevices : '🔕'}</option>`));
+    return `
+      ${card(`
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Кому</span>
+          <select class="field" data-chg="notifyField" data-key="userId" ${n.users ? '' : 'disabled'}>${opts.join('')}</select></label>
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Заголовок (необов’язково)</span>
+          <input class="field" data-inp="notifyField" data-key="title" maxlength="60" placeholder="Повідомлення від адміністратора" value="${esc(n.title)}"></label>
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Текст</span>
+          <textarea class="field" data-inp="notifyField" data-key="body" maxlength="300" rows="4" placeholder="Наприклад: завтра перша пара скасована">${esc(n.body)}</textarea></label>
+        <div class="${n.cls} small" ${n.msg ? '' : 'hidden'}>${esc(n.msg)}</div>
+        <button class="btn" data-act="notifySend" ${n.sending ? 'disabled' : ''}>${n.sending ? '<span class="spin"></span>' : 'Надіслати'}</button>`)}
+      <div class="foot">Сповіщення прийде на всі пристрої обраної людини, де вона ввімкнула сповіщення (🔔 і число — кількість таких пристроїв, 🔕 — сповіщення не ввімкнені). Налаштування нагадувань на нього не впливають.</div>`;
+  }
+
+  async function loadNotifyUsers() {
+    try {
+      S.notify.users = await api('GET', '/api/admin/users');
+      if (S.notify.userId !== 'all' && !S.notify.users.some((u) => u.id === S.notify.userId)) S.notify.userId = 'all';
+    } catch (e) { S.notify.msg = e.message; S.notify.cls = 'err'; }
+    render();
+  }
+
   function pushStatusText() {
     const p = S.push;
     if (!p.supported) return isIOS && !isStandalone() ? 'Потрібна іконка на екрані «Додому»' : 'Не підтримується';
@@ -463,8 +490,10 @@
     { id: 'today', title: 'Сьогодні', icon: 'bolt' },
     { id: 'schedule', title: 'Розклад', icon: 'calendar' },
     { id: 'homework', title: 'Домашня', icon: 'book' },
+    { id: 'notify', title: 'Сповіщення', icon: 'bell', admin: true },
     { id: 'settings', title: 'Налаштування', icon: 'gear' },
   ];
+  const visibleTabs = () => TABS.filter((t) => !t.admin || isAdmin());
 
   function render() {
     const app = $('#app');
@@ -473,9 +502,12 @@
       if (!$('#loginForm')) app.innerHTML = viewLogin();
       return;
     }
+    const a = document.activeElement;
+    if (S.tab === 'notify' && a && a.closest && a.closest('main') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не збиваємо введення
     const y = window.scrollY;
-    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, settings: viewSettings };
-    const cur = TABS.find((t) => t.id === S.tab) || TABS[0];
+    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, notify: viewNotify, settings: viewSettings };
+    const tabs = visibleTabs();
+    const cur = tabs.find((t) => t.id === S.tab) || tabs[0];
     const q = moderationQueue().length;
     app.innerHTML = `
       <header class="topbar"><h1>${cur.title}</h1><div class="right">
@@ -483,7 +515,7 @@
         <button class="icon-btn ${S.syncing ? 'refreshing' : ''}" data-act="sync" aria-label="Оновити">${ic('refresh', 20)}</button>
       </div></header>
       <main class="content">${views[cur.id]()}</main>
-      <nav class="tabbar"><div class="tabbar-in">${TABS.map((t) => `
+      <nav class="tabbar"><div class="tabbar-in">${tabs.map((t) => `
         <button class="tab ${t.id === S.tab ? 'active' : ''}" data-act="tab" data-tab="${t.id}">${ic(t.icon, 22)}<span>${t.title}</span>
           ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}</button>`).join('')}</div></nav>`;
     window.scrollTo(0, y);
@@ -887,7 +919,7 @@
   }
 
   const ACT = {
-    tab(el) { S.tab = el.dataset.tab; window.scrollTo(0, 0); render(); },
+    tab(el) { S.tab = el.dataset.tab; window.scrollTo(0, 0); render(); if (S.tab === 'notify') loadNotifyUsers(); },
     sync() { sync(); },
     lesson(el) { openLesson(el.dataset.id); },
     day(el) { S.day = sod(new Date(+el.dataset.ts)); render(); },
@@ -997,6 +1029,20 @@
       if (s && s.reload) s.reload();
     },
 
+    async notifySend(el) {
+      const n = S.notify;
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (!n.body.trim()) { n.msg = 'Введіть текст сповіщення.'; n.cls = 'err'; render(); return; }
+      const target = n.userId === 'all' ? 'усім' : (n.users.find((u) => u.id === n.userId) || {}).fullName;
+      if (!confirm(`Надіслати сповіщення: ${target}?`)) return;
+      n.sending = true; n.msg = ''; render();
+      try {
+        const r = await api('POST', '/api/admin/notify', { userId: n.userId, title: n.title.trim(), body: n.body.trim() });
+        n.msg = `Надіслано на пристроїв: ${r.sent}`; n.cls = 'ok'; n.body = '';
+      } catch (e) { n.msg = e.message; n.cls = 'err'; }
+      n.sending = false;
+      render();
+    },
     lead(el) {
       S.settings.leadMinutes = Math.min(15, Math.max(1, S.settings.leadMinutes + +el.dataset.d));
       saveSettings(); pushSettingsChanged(); render();
@@ -1054,11 +1100,18 @@
       saveSettings();
       pushSettingsChanged();
       if (el.dataset.key === 'notificationsEnabled' && el.checked && S.push.supported && !S.push.subscribed) enablePush();
+    } else if (el.dataset.chg === 'notifyField') {
+      S.notify[el.dataset.key] = el.value;
     } else if (el.dataset.chg === 'schedFile' && el.files && el.files[0]) {
       const f = el.files[0];
       el.value = '';
       importSchedule(f);
     }
+  });
+
+  document.addEventListener('input', (e) => {
+    const el = e.target.closest('[data-inp]');
+    if (el && el.dataset.inp === 'notifyField') S.notify[el.dataset.key] = el.value;
   });
 
   document.addEventListener('submit', async (e) => {
@@ -1106,7 +1159,7 @@
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
     else if (p.has('answered')) { markAnswered(p.get('answered')); toast('Добре, відмітили'); render(); }
     else if (p.get('tab') === 'moderation') { if (isAdmin()) { S.tab = 'homework'; render(); openModeration(); } }
-    else if (p.get('tab')) { S.tab = TABS.some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
+    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
   }
 
   // ───────────── запуск ─────────────
