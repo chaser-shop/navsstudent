@@ -215,8 +215,10 @@ async function sendPush(sub, payload) {
   } catch (e) {
     const status = (e && e.statusCode) || 0;
     const body = e && e.body ? String(e.body).slice(0, 200) : '';
-    if (status === 404 || status === 410) {
+    if (status === 404 || status === 410 || /VapidPkHashMismatch/i.test(body)) {
+      // 400 VapidPkHashMismatch: підписку створено з іншим VAPID-ключем — вона марна, клієнт створить нову.
       await pushSubs.deleteOne({ _id: sub._id }).catch(() => {});
+      if (status === 400) console.error('push 400: VapidPkHashMismatch — стару підписку видалено');
     } else if ((status === 401 || status === 403) && sub.vapidKey !== VAPID_KEY_ID) {
       await pushSubs.deleteOne({ _id: sub._id }).catch(() => {});
       console.error(`push ${status}: підписка зі старим VAPID-ключем видалена`, body);
