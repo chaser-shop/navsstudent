@@ -1,0 +1,730 @@
+'use strict';
+/*
+ * Щоденник студента — сервер.
+ * Node.js + MongoDB + Web Push. Віддає вебверсію (папка public) і REST API,
+ * сумісний із iOS-застосунком (/api/auth/login, /api/sync, /api/homework …).
+ */
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { MongoClient } = require('mongodb');
+const webpush = require('web-push');
+
+// ───────────────────────── Налаштування ─────────────────────────
+
+const PORT = parseInt(process.env.PORT, 10) || 3000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.DB_NAME || 'diary';
+const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
+const TICK_MS = parseInt(process.env.SCHEDULER_INTERVAL_MS, 10) || 30000;
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const MAX_BODY = 5 * 1024 * 1024;
+const MAX_ADMIN_DEVICES = 5;
+
+const normName = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+const normKey = (s) => normName(s).toLocaleLowerCase('uk');
+const ADMIN_NAMES = new Set((process.env.ADMIN_NAMES || '').split(',').map(normKey).filter(Boolean));
+
+if (!MONGODB_URI) {
+  console.error('Не задано MONGODB_URI. Додайте змінну середовища з рядком підключення до MongoDB.');
+  process.exit(1);
+}
+
+// ───────────────────────── Утиліти ─────────────────────────
+
+class HttpError extends Error {
+  constructor(status, message, extra) {
+    super(message);
+    this.status = status;
+    this.extra = extra || {};
+  }
+}
+
+const clampInt = (v, min, max, def) => {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
+};
+const str = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
+const toDate = (v) => {
+  if (v == null || v === '') return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+const sha = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 32);
+const safeEq = (a, b) => {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+
+function cleanLink(v) {
+  let s = str(v, 500);
+  if (!s) return '';
+  if (!s.includes('://')) s = 'https://' + s;
+  let u;
+  try { u = new URL(s); } catch { throw new HttpError(400, 'Некоректне посилання.'); }
+  if (!/^https?:$/.test(u.protocol)) throw new HttpError(400, 'Посилання має починатися з http:// або https://');
+  return u.toString();
+}
+
+function cleanSettings(s) {
+  s = s || {};
+  return {
+    notificationsEnabled: s.notificationsEnabled !== false,
+    leadMinutes: clampInt(s.leadMinutes, 1, 15, 2),
+    askHomework: s.askHomework !== false,
+    notifyHomework: s.notifyHomework !== false,
+  };
+}
+
+const fmtTime = (d) =>
+  new Intl.DateTimeFormat('uk-UA', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: APP_TZ }).format(d);
+const fmtDay = (d) =>
+  new Intl.DateTimeFormat('uk-UA', { day: 'numeric', month: 'long', timeZone: APP_TZ }).format(d);
+const kindTitle = (k) => ({ 'Лк': 'Лекція', 'Пз': 'Практична', 'Сем': 'Семінар', '': 'Пара' }[k] ?? k);
+const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'ауд. ' + l.room : '—');
+
+// ───────────────────────── База даних ─────────────────────────
+
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config;
+let SECRET;
+
+async function getConfig(key, make) {
+  const doc = await config.findOne({ _id: key });
+  if (doc) return doc.value;
+  const value = make();
+  try {
+    await config.insertOne({ _id: key, value });
+    return value;
+  } catch (e) {
+    if (e && e.code === 11000) return (await config.findOne({ _id: key })).value;
+    throw e;
+  }
+}
+
+async function initDb() {
+  const client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 15000 });
+  await client.connect();
+  db = client.db(DB_NAME);
+  users = db.collection('users');
+  lessons = db.collection('lessons');
+  subjects = db.collection('subjects');
+  teachers = db.collection('teachers');
+  homework = db.collection('homework');
+  pushSubs = db.collection('pushSubs');
+  sent = db.collection('sentNotifications');
+  config = db.collection('config');
+
+  await users.createIndex({ nameKey: 1 }, { unique: true });
+  await lessons.createIndex({ start: 1 });
+  await lessons.createIndex({ end: 1 });
+  await homework.createIndex({ due: 1 });
+  await pushSubs.createIndex({ userId: 1 });
+  await sent.createIndex({ at: 1 }, { expireAfterSeconds: 3 * 24 * 3600 });
+
+  SECRET = process.env.JWT_SECRET || (await getConfig('jwtSecret', () => crypto.randomBytes(32).toString('hex')));
+
+  let vapid;
+  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    vapid = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
+  } else {
+    vapid = await getConfig('vapid', () => webpush.generateVAPIDKeys());
+  }
+  webpush.setVapidDetails(VAPID_SUBJECT, vapid.publicKey, vapid.privateKey);
+  return vapid.publicKey;
+}
+
+// ───────────────────────── Токени ─────────────────────────
+
+const TOKEN_TTL = 365 * 24 * 3600 * 1000;
+
+function signToken(uid) {
+  const p = Buffer.from(JSON.stringify({ u: uid, t: Date.now() })).toString('base64url');
+  const s = crypto.createHmac('sha256', SECRET).update(p).digest('base64url');
+  return p + '.' + s;
+}
+
+function verifyToken(token) {
+  const [p, s] = String(token || '').split('.');
+  if (!p || !s) return null;
+  const exp = crypto.createHmac('sha256', SECRET).update(p).digest('base64url');
+  if (!safeEq(s, exp)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+    if (!data.u || Date.now() - data.t > TOKEN_TTL) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+const attempts = new Map();
+function rateLimit(ip, max = 30, windowMs = 10 * 60 * 1000) {
+  const now = Date.now();
+  const list = (attempts.get(ip) || []).filter((t) => now - t < windowMs);
+  list.push(now);
+  attempts.set(ip, list);
+  if (list.length > max) throw new HttpError(429, 'Забагато спроб. Спробуйте за кілька хвилин.');
+}
+setInterval(() => attempts.clear(), 60 * 60 * 1000).unref();
+
+// ───────────────────────── Серіалізація ─────────────────────────
+
+const pubUser = (u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin });
+const pubLesson = (l) => ({
+  id: l._id, pair: l.pair, start: l.start, end: l.end, subjectKey: l.subjectKey,
+  kind: l.kind, topic: l.topic, room: l.room, teacher: l.teacher, isRemote: !!l.isRemote,
+});
+const pubHw = (h) => ({
+  id: h._id, subjectKey: h.subjectKey, lessonID: h.lessonID || null, text: h.text,
+  due: h.due, created: h.created, status: h.status, authorID: h.authorID, authorName: h.authorName,
+});
+
+// ───────────────────────── Push ─────────────────────────
+
+async function sendPush(sub, payload) {
+  try {
+    await webpush.sendNotification(sub.subscription, JSON.stringify(payload), {
+      TTL: payload.ttl || 600,
+      urgency: 'high',
+    });
+    return true;
+  } catch (e) {
+    if (e && (e.statusCode === 404 || e.statusCode === 410)) {
+      await pushSubs.deleteOne({ _id: sub._id }).catch(() => {});
+    } else {
+      console.error('push error:', (e && (e.statusCode || e.message)) || e);
+    }
+    return false;
+  }
+}
+
+async function subjectNames() {
+  const map = {};
+  for (const s of await subjects.find({}).toArray()) {
+    if (s.fullName && s.fullName.trim()) map[s._id] = s.fullName.trim();
+  }
+  return map;
+}
+
+const enc = encodeURIComponent;
+
+function startPayload(l, names, now) {
+  const mins = Math.max(1, Math.round((l.start.getTime() - now) / 60000));
+  return {
+    title: `Пара через ${mins} хв — заходь!`,
+    body: `${names[l.subjectKey] || l.subjectKey} · ${kindTitle(l.kind)} · ${fmtTime(l.start)} · ${placeTitle(l)}`,
+    tag: 'start-' + l._id,
+    data: { url: `/?lesson=${enc(l._id)}&join=1` },
+    actions: [{ action: 'open', title: 'Відкрити пару' }],
+    ttl: 300,
+  };
+}
+
+function endPayload(l, names) {
+  return {
+    title: `Пара закінчилась: ${names[l.subjectKey] || l.subjectKey}`,
+    body: 'Що задали додому?',
+    tag: 'end-' + l._id,
+    data: { url: `/?homework=${enc(l._id)}`, noneUrl: `/?answered=${enc(l._id)}` },
+    actions: [
+      { action: 'write', title: 'Записати ДЗ' },
+      { action: 'none', title: 'Нічого не задали' },
+    ],
+    ttl: 1800,
+  };
+}
+
+async function claim(key) {
+  try {
+    await sent.insertOne({ _id: key, at: new Date() });
+    return true;
+  } catch (e) {
+    if (e && e.code === 11000) return false;
+    throw e;
+  }
+}
+
+let ticking = false;
+async function tick() {
+  if (ticking) return;
+  ticking = true;
+  try {
+    const now = Date.now();
+    const subs = await pushSubs.find({ 'settings.notificationsEnabled': true }).toArray();
+    if (!subs.length) return;
+    const starting = await lessons.find({ start: { $gt: new Date(now), $lte: new Date(now + 16 * 60000) } }).toArray();
+    const ended = await lessons.find({ end: { $gt: new Date(now - 20 * 60000), $lte: new Date(now) } }).toArray();
+    if (!starting.length && !ended.length) return;
+    const names = await subjectNames();
+
+    await Promise.allSettled(subs.map(async (sub) => {
+      const lead = clampInt(sub.settings && sub.settings.leadMinutes, 1, 15, 2) * 60000;
+      for (const l of starting) {
+        if (l.start.getTime() - lead > now) continue;
+        if (!(await claim(`s|${sub._id}|${l._id}`))) continue;
+        await sendPush(sub, startPayload(l, names, now));
+      }
+      if (sub.settings && sub.settings.askHomework === false) return;
+      for (const l of ended) {
+        if (!(await claim(`e|${sub._id}|${l._id}`))) continue;
+        await sendPush(sub, endPayload(l, names));
+      }
+    }));
+  } catch (e) {
+    console.error('scheduler error:', e);
+  } finally {
+    ticking = false;
+  }
+}
+
+async function notifyApproved(hw) {
+  try {
+    const subs = await pushSubs.find({ 'settings.notificationsEnabled': true }).toArray();
+    const names = await subjectNames();
+    const payload = {
+      title: `Нове домашнє: ${names[hw.subjectKey] || hw.subjectKey}`,
+      body: `${hw.text.slice(0, 160)} (до ${fmtDay(hw.due)})`,
+      tag: 'hw-' + hw._id,
+      data: { url: '/?tab=homework' },
+      ttl: 3600,
+    };
+    await Promise.allSettled(
+      subs
+        .filter((s) => s.userId !== hw.authorID && s.settings && s.settings.notifyHomework !== false)
+        .map((s) => sendPush(s, payload))
+    );
+  } catch (e) {
+    console.error('notifyApproved:', e);
+  }
+}
+
+async function notifyPending(hw) {
+  try {
+    const admins = await users.find({ isAdmin: true }).toArray();
+    if (!admins.length) return;
+    const ids = new Set(admins.map((a) => a._id));
+    const subs = (await pushSubs.find({ 'settings.notificationsEnabled': true }).toArray()).filter((s) => ids.has(s.userId));
+    const names = await subjectNames();
+    const payload = {
+      title: 'Домашнє на підтвердження',
+      body: `${hw.authorName}: ${names[hw.subjectKey] || hw.subjectKey} — ${hw.text.slice(0, 140)}`,
+      tag: 'hw-pending-' + hw._id,
+      data: { url: '/?tab=moderation' },
+      ttl: 3600,
+    };
+    await Promise.allSettled(subs.map((s) => sendPush(s, payload)));
+  } catch (e) {
+    console.error('notifyPending:', e);
+  }
+}
+
+// ───────────────────────── Маршрути ─────────────────────────
+
+const routes = [];
+function route(method, pattern, handler, opts = {}) {
+  const keys = [];
+  const re = new RegExp('^' + pattern.replace(/:([a-zA-Z]+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
+  routes.push({ method, re, keys, handler, auth: opts.auth !== false, admin: !!opts.admin });
+}
+
+const ok = () => ({});
+
+let VAPID_PUBLIC = '';
+
+// — вхід
+route('POST', '/api/auth/login', async ({ body, ip }) => {
+  rateLimit(ip);
+  const fullName = normName(body.fullName);
+  const deviceId = str(body.deviceId, 100);
+  if (fullName.length > 100 || fullName.split(' ').length < 2) {
+    throw new HttpError(400, 'Введіть прізвище, ім’я та по батькові.');
+  }
+  if (!deviceId) throw new HttpError(400, 'Не вказано ідентифікатор пристрою.');
+  const nameKey = normKey(fullName);
+  const adminByName = ADMIN_NAMES.has(nameKey);
+
+  let user = await users.findOne({ nameKey });
+  if (!user) {
+    const isAdmin = adminByName || (ADMIN_NAMES.size === 0 && (await users.countDocuments({})) === 0);
+    user = { _id: crypto.randomUUID(), fullName, nameKey, isAdmin, deviceIds: [deviceId], createdAt: new Date() };
+    try {
+      await users.insertOne(user);
+    } catch (e) {
+      if (e && e.code === 11000) throw new HttpError(409, 'Цей ПІБ щойно зареєстровано. Спробуйте ще раз.');
+      throw e;
+    }
+  } else {
+    if (adminByName && !user.isAdmin) {
+      user.isAdmin = true;
+      await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
+    }
+    if (!user.deviceIds.includes(deviceId)) {
+      if (user.deviceIds.length === 0) {
+        // Адміністратор відв'язав усі пристрої — перший, хто увійде, стає новим.
+        user.deviceIds = [deviceId];
+        await users.updateOne({ _id: user._id }, { $set: { deviceIds: user.deviceIds } });
+      } else if (user.isAdmin && ADMIN_PASSWORD) {
+        const pass = String(body.password || '');
+        if (!pass) throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
+        if (!safeEq(pass, ADMIN_PASSWORD)) throw new HttpError(403, 'Невірний пароль.', { code: 'password_required' });
+        const devices = [...user.deviceIds, deviceId].slice(-MAX_ADMIN_DEVICES);
+        await users.updateOne({ _id: user._id }, { $set: { deviceIds: devices } });
+        user.deviceIds = devices;
+      } else {
+        throw new HttpError(403, 'Цей ПІБ уже закріплено за іншим пристроєм. Попросіть адміністратора відв’язати його.', { code: 'device_bound' });
+      }
+    }
+  }
+  return { token: signToken(user._id), user: pubUser(user) };
+}, { auth: false });
+
+// — синхронізація
+route('GET', '/api/sync', async ({ user }) => {
+  const since = new Date(Date.now() - 60 * 24 * 3600 * 1000);
+  const [ls, subs, tchs, hws, title] = await Promise.all([
+    lessons.find({}).sort({ start: 1 }).toArray(),
+    subjects.find({}).toArray(),
+    teachers.find({}).toArray(),
+    homework.find({ due: { $gte: since } }).sort({ due: 1 }).toArray(),
+    config.findOne({ _id: 'scheduleTitle' }),
+  ]);
+  const subjectMap = {};
+  for (const s of subs) subjectMap[s._id] = { fullName: s.fullName || '', link: s.link || '' };
+  const teacherMap = {};
+  for (const t of tchs) teacherMap[t._id] = t.fullName || '';
+  const visible = hws.filter((h) => user.isAdmin || h.status === 'approved' || h.authorID === user._id);
+  return {
+    user: pubUser(user),
+    scheduleTitle: (title && title.value) || '',
+    lessons: ls.map(pubLesson),
+    subjects: subjectMap,
+    teachers: teacherMap,
+    homework: visible.map(pubHw),
+  };
+});
+
+// — розклад (адмін)
+route('PUT', '/api/schedule', async ({ body }) => {
+  if (!Array.isArray(body.lessons)) throw new HttpError(400, 'Некоректний розклад.');
+  if (body.lessons.length > 5000) throw new HttpError(400, 'Забагато пар у файлі.');
+  const byId = new Map();
+  for (const raw of body.lessons) {
+    const start = toDate(raw && raw.start);
+    const end = toDate(raw && raw.end);
+    const id = str(raw && raw.id, 40);
+    const subjectKey = str(raw && raw.subjectKey, 100);
+    if (!id || !start || !end || end <= start || !subjectKey) continue;
+    byId.set(id, {
+      _id: id, pair: clampInt(raw.pair, 0, 30, 0), start, end, subjectKey,
+      kind: str(raw.kind, 20), topic: str(raw.topic, 80), room: str(raw.room, 60),
+      teacher: str(raw.teacher, 200), isRemote: !!raw.isRemote,
+    });
+  }
+  const docs = [...byId.values()];
+  if (!docs.length) throw new HttpError(400, 'У розкладі немає жодної пари.');
+  const minStart = new Date(Math.min(...docs.map((d) => d.start.getTime())));
+  // Новий файл замінює пари від його першої дати; домашнє й посилання лишаються.
+  await lessons.deleteMany({ start: { $gte: minStart } });
+  await lessons.deleteMany({ _id: { $in: docs.map((d) => d._id) } });
+  await lessons.insertMany(docs);
+  await config.updateOne({ _id: 'scheduleTitle' }, { $set: { value: str(body.title, 300) } }, { upsert: true });
+  return ok();
+}, { admin: true });
+
+// — предмети й викладачі (адмін)
+route('PUT', '/api/subjects', async ({ body }) => {
+  const key = str(body.key, 100);
+  if (!key) throw new HttpError(400, 'Не вказано предмет.');
+  await subjects.updateOne({ _id: key }, { $set: { fullName: str(body.fullName, 200), link: cleanLink(body.link) } }, { upsert: true });
+  return ok();
+}, { admin: true });
+
+route('PUT', '/api/teachers', async ({ body }) => {
+  const key = str(body.key, 200);
+  if (!key) throw new HttpError(400, 'Не вказано викладача.');
+  await teachers.updateOne({ _id: key }, { $set: { fullName: str(body.fullName, 200) } }, { upsert: true });
+  return ok();
+}, { admin: true });
+
+// — домашнє
+function readHomeworkBody(body) {
+  const subjectKey = str(body.subjectKey, 100);
+  const text = str(body.text, 2000);
+  const due = toDate(body.due);
+  if (!subjectKey) throw new HttpError(400, 'Оберіть предмет.');
+  if (!text) throw new HttpError(400, 'Опишіть, що задали.');
+  if (!due) throw new HttpError(400, 'Некоректна дата.');
+  return { subjectKey, text, due, lessonID: body.lessonID ? str(body.lessonID, 40) : null };
+}
+
+route('POST', '/api/homework', async ({ body, user }) => {
+  const data = readHomeworkBody(body);
+  const hw = {
+    _id: crypto.randomUUID(), ...data, created: new Date(),
+    status: user.isAdmin ? 'approved' : 'pending', authorID: user._id, authorName: user.fullName,
+  };
+  await homework.insertOne(hw);
+  (user.isAdmin ? notifyApproved : notifyPending)(hw);
+  return ok();
+});
+
+async function loadEditable(id, user) {
+  const hw = await homework.findOne({ _id: id });
+  if (!hw) throw new HttpError(404, 'Завдання не знайдено.');
+  if (!(user.isAdmin || (hw.authorID === user._id && hw.status !== 'approved'))) {
+    throw new HttpError(403, 'Це завдання вже підтверджене — змінити його може лише адміністратор.');
+  }
+  return hw;
+}
+
+route('PATCH', '/api/homework/:id', async ({ params, body, user }) => {
+  const hw = await loadEditable(params.id, user);
+  const data = readHomeworkBody(body);
+  const set = { subjectKey: data.subjectKey, text: data.text, due: data.due };
+  if (data.lessonID) set.lessonID = data.lessonID;
+  if (!user.isAdmin && hw.status === 'rejected') set.status = 'pending';
+  await homework.updateOne({ _id: hw._id }, { $set: set });
+  if (set.status === 'pending') notifyPending({ ...hw, ...set });
+  return ok();
+});
+
+route('POST', '/api/homework/:id/approve', async ({ params }) => {
+  const hw = await homework.findOne({ _id: params.id });
+  if (!hw) throw new HttpError(404, 'Завдання не знайдено.');
+  await homework.updateOne({ _id: hw._id }, { $set: { status: 'approved' } });
+  if (hw.status !== 'approved') notifyApproved(hw);
+  return ok();
+}, { admin: true });
+
+route('POST', '/api/homework/:id/reject', async ({ params }) => {
+  const res = await homework.updateOne({ _id: params.id }, { $set: { status: 'rejected' } });
+  if (!res.matchedCount) throw new HttpError(404, 'Завдання не знайдено.');
+  return ok();
+}, { admin: true });
+
+route('DELETE', '/api/homework/:id', async ({ params, user }) => {
+  const hw = await loadEditable(params.id, user);
+  await homework.deleteOne({ _id: hw._id });
+  return ok();
+});
+
+// — сповіщення
+route('GET', '/api/push/config', async () => ({ publicKey: VAPID_PUBLIC }), { auth: false });
+
+route('POST', '/api/push/subscribe', async ({ body, user, req }) => {
+  const s = body.subscription || {};
+  const keys = s.keys || {};
+  if (typeof s.endpoint !== 'string' || !/^https:\/\//.test(s.endpoint) || s.endpoint.length > 2000 ||
+      typeof keys.p256dh !== 'string' || typeof keys.auth !== 'string') {
+    throw new HttpError(400, 'Некоректна підписка на сповіщення.');
+  }
+  await pushSubs.updateOne(
+    { _id: sha(s.endpoint) },
+    {
+      $set: {
+        userId: user._id,
+        subscription: { endpoint: s.endpoint, keys: { p256dh: keys.p256dh, auth: keys.auth } },
+        settings: cleanSettings(body.settings),
+        userAgent: str(req.headers['user-agent'], 200),
+        updatedAt: new Date(),
+      },
+      $setOnInsert: { createdAt: new Date() },
+    },
+    { upsert: true }
+  );
+  return ok();
+});
+
+route('PUT', '/api/push/settings', async ({ body, user }) => {
+  const id = sha(str(body.endpoint, 2000));
+  const res = await pushSubs.updateOne({ _id: id, userId: user._id }, { $set: { settings: cleanSettings(body.settings), updatedAt: new Date() } });
+  if (!res.matchedCount) throw new HttpError(404, 'Підписку не знайдено. Увімкніть сповіщення знову.');
+  return ok();
+});
+
+route('POST', '/api/push/unsubscribe', async ({ body, user }) => {
+  await pushSubs.deleteOne({ _id: sha(str(body.endpoint, 2000)), userId: user._id });
+  return ok();
+});
+
+route('POST', '/api/push/test', async ({ body, user }) => {
+  const sub = await pushSubs.findOne({ _id: sha(str(body.endpoint, 2000)), userId: user._id });
+  if (!sub) throw new HttpError(404, 'Підписку не знайдено. Увімкніть сповіщення знову.');
+  const names = await subjectNames();
+  const now = Date.now();
+  const next = await lessons.find({ end: { $gt: new Date(now) } }).sort({ start: 1 }).limit(1).toArray();
+  const payload = next.length
+    ? { ...startPayload(next[0], names, Math.max(now, next[0].start.getTime() - 120000)), tag: 'test' }
+    : { title: 'Тестове сповіщення', body: 'Сповіщення працюють.', tag: 'test', data: { url: '/' } };
+  const delivered = await sendPush(sub, payload);
+  if (!delivered) throw new HttpError(502, 'Не вдалося надіслати сповіщення. Вимкніть і ввімкніть їх знову.');
+  return ok();
+});
+
+// — учасники (адмін)
+route('GET', '/api/admin/users', async () => {
+  const list = await users.find({}).sort({ fullName: 1 }).toArray();
+  return list.map((u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, devices: (u.deviceIds || []).length, createdAt: u.createdAt }));
+}, { admin: true });
+
+route('POST', '/api/admin/users/:id/reset-devices', async ({ params }) => {
+  const res = await users.updateOne({ _id: params.id }, { $set: { deviceIds: [] } });
+  if (!res.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
+  return ok();
+}, { admin: true });
+
+route('DELETE', '/api/admin/users/:id', async ({ params, user }) => {
+  if (params.id === user._id) throw new HttpError(400, 'Не можна видалити самого себе.');
+  await users.deleteOne({ _id: params.id });
+  await pushSubs.deleteMany({ userId: params.id });
+  return ok();
+}, { admin: true });
+
+// ───────────────────────── HTTP ─────────────────────────
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8',
+};
+
+const SECURITY = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'X-Frame-Options': 'DENY',
+};
+const CSP = "default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'";
+
+function sendJson(res, status, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+    ...SECURITY,
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) { reject(new HttpError(413, 'Запит завеликий.')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (!chunks.length) return resolve({});
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        resolve(parsed && typeof parsed === 'object' ? parsed : {});
+      } catch {
+        reject(new HttpError(400, 'Некоректний JSON.'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+async function handleApi(req, res, url) {
+  try {
+    const r = routes.find((x) => x.method === req.method && x.re.test(url.pathname));
+    if (!r) {
+      if (routes.some((x) => x.re.test(url.pathname))) throw new HttpError(405, 'Метод не підтримується.');
+      throw new HttpError(404, 'Не знайдено.');
+    }
+    const m = r.re.exec(url.pathname);
+    const params = {};
+    r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]); });
+
+    let user = null;
+    if (r.auth) {
+      const auth = req.headers.authorization || '';
+      const data = verifyToken(auth.startsWith('Bearer ') ? auth.slice(7) : '');
+      user = data && (await users.findOne({ _id: data.u }));
+      if (!user) throw new HttpError(401, 'Сеанс завершено.');
+      if (r.admin && !user.isAdmin) throw new HttpError(403, 'Лише для адміністратора.');
+    }
+    const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
+    const ip = ((req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket.remoteAddress || '').trim();
+    const result = await r.handler({ req, params, query: url.searchParams, body, user, ip });
+    sendJson(res, 200, result === undefined ? {} : result);
+  } catch (e) {
+    if (e instanceof HttpError) return sendJson(res, e.status, { error: e.message, ...e.extra });
+    console.error('API error:', req.method, req.url, e);
+    sendJson(res, 500, { error: 'Внутрішня помилка сервера.' });
+  }
+}
+
+function serveStatic(req, res, url) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { Allow: 'GET, HEAD' });
+    return res.end();
+  }
+  let rel;
+  try { rel = decodeURIComponent(url.pathname); } catch { rel = '/'; }
+  let file = path.normalize(path.join(PUBLIC_DIR, rel));
+  if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end(); }
+
+  let stat = null;
+  try { stat = fs.statSync(file); if (stat.isDirectory()) { file = path.join(file, 'index.html'); stat = fs.statSync(file); } } catch { stat = null; }
+  if (!stat) {
+    if (path.extname(rel)) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Не знайдено'); }
+    file = path.join(PUBLIC_DIR, 'index.html');
+    try { stat = fs.statSync(file); } catch { res.writeHead(404); return res.end(); }
+  }
+
+  const ext = path.extname(file).toLowerCase();
+  const etag = `W/"${stat.size}-${Math.floor(stat.mtimeMs)}"`;
+  const headers = {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Cache-Control': ext === '.png' ? 'public, max-age=86400' : 'no-cache',
+    ETag: etag,
+    ...SECURITY,
+  };
+  if (ext === '.html') headers['Content-Security-Policy'] = CSP;
+  if (path.basename(file) === 'sw.js') headers['Service-Worker-Allowed'] = '/';
+  if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
+  headers['Content-Length'] = stat.size;
+  res.writeHead(200, headers);
+  if (req.method === 'HEAD') return res.end();
+  fs.createReadStream(file).pipe(res);
+}
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+    return res.end('ok');
+  }
+  if (url.pathname.startsWith('/api/')) return void handleApi(req, res, url);
+  serveStatic(req, res, url);
+});
+
+// ───────────────────────── Запуск ─────────────────────────
+
+(async () => {
+  VAPID_PUBLIC = await initDb();
+  server.listen(PORT, () => console.log(`Щоденник: сервер слухає порт ${PORT}`));
+  setInterval(tick, TICK_MS);
+
+  // Безкоштовні хостинги «присипляють» сервіс без запитів — тоді сповіщення не відправляються.
+  // На Render сервіс сам себе «будить» раз на 10 хвилин (вимкнути: KEEP_ALIVE=0).
+  const self = process.env.RENDER_EXTERNAL_URL;
+  if (self && process.env.KEEP_ALIVE !== '0') {
+    setInterval(() => { fetch(self + '/healthz').catch(() => {}); }, 10 * 60 * 1000).unref();
+  }
+})().catch((e) => {
+  console.error('Не вдалося запустити сервер:', e);
+  process.exit(1);
+});
+
+process.on('SIGTERM', () => { server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 3000).unref(); });
