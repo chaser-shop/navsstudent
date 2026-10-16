@@ -195,7 +195,10 @@ setInterval(() => attempts.clear(), 60 * 60 * 1000).unref();
 
 // ───────────────────────── Серіалізація ─────────────────────────
 
-const pubUser = (u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin });
+const ROLES = { starosta: 'Староста', deputy: 'Заступник старости' };
+/** Адміністратор, староста або заступник старости: підтверджують домашнє й завантажують розклад. */
+const isMod = (u) => !!(u && (u.isAdmin || ROLES[u.role]));
+const pubUser = (u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', canModerate: isMod(u) });
 const pubLesson = (l) => ({
   id: l._id, pair: l.pair, start: l.start, end: l.end, subjectKey: l.subjectKey,
   kind: l.kind, topic: l.topic, room: l.room, teacher: l.teacher, isRemote: !!l.isRemote,
@@ -341,7 +344,7 @@ async function notifyApproved(hw) {
 
 async function notifyPending(hw) {
   try {
-    const admins = await users.find({ isAdmin: true }).toArray();
+    const admins = await users.find({ $or: [{ isAdmin: true }, { role: { $in: Object.keys(ROLES) } }] }).toArray();
     if (!admins.length) return;
     const ids = new Set(admins.map((a) => a._id));
     const subs = (await pushSubs.find({ 'settings.notificationsEnabled': true }).toArray()).filter((s) => ids.has(s.userId));
@@ -416,7 +419,7 @@ const routes = [];
 function route(method, pattern, handler, opts = {}) {
   const keys = [];
   const re = new RegExp('^' + pattern.replace(/:([a-zA-Z]+)/g, (_, k) => { keys.push(k); return '([^/]+)'; }) + '$');
-  routes.push({ method, re, keys, handler, auth: opts.auth !== false, admin: !!opts.admin });
+  routes.push({ method, re, keys, handler, auth: opts.auth !== false, admin: !!opts.admin, mod: !!opts.mod });
 }
 
 const ok = () => ({});
@@ -513,7 +516,7 @@ route('GET', '/api/sync', async ({ user }) => {
   for (const s of subs) subjectMap[s._id] = { fullName: s.fullName || '', link: s.link || '' };
   const teacherMap = {};
   for (const t of tchs) teacherMap[t._id] = t.fullName || '';
-  const visible = hws.filter((h) => user.isAdmin || h.status === 'approved' || h.authorID === user._id);
+  const visible = hws.filter((h) => isMod(user) || h.status === 'approved' || h.authorID === user._id);
   return {
     user: pubUser(user),
     scheduleTitle: (title && title.value) || '',
@@ -553,7 +556,7 @@ route('PUT', '/api/schedule', async ({ body }) => {
   await lessons.insertMany(docs);
   await config.updateOne({ _id: 'scheduleTitle' }, { $set: { value: str(body.title, 300) } }, { upsert: true });
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 // — відповідь на «Що задали?» (запам'ятовується за користувачем, а не за пристроєм)
 async function saveAnswers(user, ids) {
@@ -577,7 +580,7 @@ route('POST', '/api/lessons/:id/no-homework', async ({ params }) => {
   if (!l) throw new HttpError(404, 'Пару не знайдено.');
   await noHw.updateOne({ _id: l._id }, { $set: { at: new Date() } }, { upsert: true });
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 // — предмети й викладачі (адмін)
 route('PUT', '/api/subjects', async ({ body }) => {
@@ -674,19 +677,19 @@ route('POST', '/api/homework', async ({ body, user }) => {
   const data = await readHomeworkBody(body, user, id);
   const hw = {
     _id: id, ...data, created: new Date(),
-    status: user.isAdmin ? 'approved' : 'pending', authorID: user._id, authorName: user.fullName,
+    status: isMod(user) ? 'approved' : 'pending', authorID: user._id, authorName: user.fullName,
   };
   await homework.insertOne(hw);
   await attachImages(id, data.images, []);
-  (user.isAdmin ? notifyApproved : notifyPending)(hw);
+  (isMod(user) ? notifyApproved : notifyPending)(hw);
   return ok();
 });
 
 async function loadEditable(id, user) {
   const hw = await homework.findOne({ _id: id });
   if (!hw) throw new HttpError(404, 'Завдання не знайдено.');
-  if (!(user.isAdmin || (hw.authorID === user._id && hw.status !== 'approved'))) {
-    throw new HttpError(403, 'Це завдання вже підтверджене — змінити його може лише адміністратор.');
+  if (!(isMod(user) || (hw.authorID === user._id && hw.status !== 'approved'))) {
+    throw new HttpError(403, 'Це завдання вже підтверджене — змінити його може лише адміністратор, староста чи заступник.');
   }
   return hw;
 }
@@ -696,7 +699,7 @@ route('PATCH', '/api/homework/:id', async ({ params, body, user }) => {
   const data = await readHomeworkBody(body, user, hw._id);
   const set = { subjectKey: data.subjectKey, text: data.text, due: data.due, links: data.links, images: data.images };
   if (data.lessonID) set.lessonID = data.lessonID;
-  if (!user.isAdmin && hw.status === 'rejected') set.status = 'pending';
+  if (!isMod(user) && hw.status === 'rejected') set.status = 'pending';
   await homework.updateOne({ _id: hw._id }, { $set: set });
   await attachImages(hw._id, data.images, hw.images);
   if (set.status === 'pending') notifyPending({ ...hw, ...set });
@@ -709,13 +712,13 @@ route('POST', '/api/homework/:id/approve', async ({ params }) => {
   await homework.updateOne({ _id: hw._id }, { $set: { status: 'approved' } });
   if (hw.status !== 'approved') notifyApproved(hw);
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 route('POST', '/api/homework/:id/reject', async ({ params }) => {
   const res = await homework.updateOne({ _id: params.id }, { $set: { status: 'rejected' } });
   if (!res.matchedCount) throw new HttpError(404, 'Завдання не знайдено.');
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 route('DELETE', '/api/homework/:id', async ({ params, user }) => {
   const hw = await loadEditable(params.id, user);
@@ -790,7 +793,7 @@ route('GET', '/api/admin/users', async () => {
   return list.map((u) => {
     normDevices(u);
     return {
-      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin,
+      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '',
       devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
       deviceList: u.deviceIds.map((id, i) => {
         const m = u.deviceMeta[devKey(id)] || {};
@@ -861,6 +864,17 @@ route('DELETE', '/api/admin/users/:id/devices/:key', async ({ params }) => {
 route('POST', '/api/admin/users/:id/reset-devices', async ({ params }) => {
   const res = await users.updateOne({ _id: params.id }, { $set: { deviceIds: [], deviceMeta: {}, pendingDevices: [] } });
   if (!res.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
+  return ok();
+}, { admin: true });
+
+// Призначення ролі: староста / заступник старости / без ролі (адмін).
+route('POST', '/api/admin/users/:id/role', async ({ params, body }) => {
+  const role = str(body.role, 20);
+  if (role && !ROLES[role]) throw new HttpError(400, 'Невідома роль.');
+  const target = await users.findOne({ _id: params.id });
+  if (!target) throw new HttpError(404, 'Користувача не знайдено.');
+  if (target.isAdmin) throw new HttpError(400, 'Адміністратору роль не потрібна.');
+  await users.updateOne({ _id: target._id }, role ? { $set: { role } } : { $unset: { role: '' } });
   return ok();
 }, { admin: true });
 
@@ -938,6 +952,7 @@ async function handleApi(req, res, url) {
       user = data && (await users.findOne({ _id: data.u }));
       if (!user) throw new HttpError(401, 'Сеанс завершено.');
       if (r.admin && !user.isAdmin) throw new HttpError(403, 'Лише для адміністратора.');
+      if (r.mod && !isMod(user)) throw new HttpError(403, 'Лише для адміністратора, старости чи заступника.');
     }
     const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
     const ip = ((req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket.remoteAddress || '').trim();

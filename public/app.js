@@ -252,6 +252,10 @@
   // ───────────── доменна логіка ─────────────
 
   const isAdmin = () => !!(S.user && S.user.isAdmin);
+  /** Адмін, староста або заступник: підтверджують домашнє й завантажують розклад. */
+  const isMod = () => !!(S.user && (S.user.isAdmin || S.user.canModerate));
+  const ROLE_TITLES = { starosta: 'Староста', deputy: 'Заступник старости' };
+  const roleBadge = (u) => (u && u.isAdmin ? badge('АДМІН', 'accent') : u && ROLE_TITLES[u.role] ? badge(ROLE_TITLES[u.role].toUpperCase(), 'accent') : '');
   const lessonById = (id) => S.lessons.find((l) => l.id === id);
   const lessonsOn = (day) => S.lessons.filter((l) => sameDay(l.start, day)).sort((a, b) => a.start - b.start);
   const nextLesson = (now) => S.lessons.filter((l) => l.end > now).sort((a, b) => a.start - b.start)[0];
@@ -282,13 +286,56 @@
     const next = S.lessons.filter((l) => l.subjectKey === lesson.subjectKey && l.start > lesson.end).sort((a, b) => a.start - b.start)[0];
     return next ? sod(next.start) : sod(addDays(lesson.start, 1));
   }
+  // «Здати на наступний семінар / практичну / лекцію»: дату знаходимо в розкладі самі.
+  const KIND_MODES = [['Сем', 'Наступний семінар'], ['Пз', 'Наступна практична'], ['Лк', 'Наступна лекція']];
+  const dueBase = (item) => { const l = item.lessonID && lessonById(item.lessonID); return l ? l.end : new Date(); };
+  function nextLessonFor(subjectKey, base, mode) {
+    return S.lessons.filter((l) => l.subjectKey === subjectKey && l.start > base && (mode === 'any' || l.kind === mode))
+      .sort((a, b) => a.start - b.start)[0] || null;
+  }
+  function dueModes(subjectKey, base) {
+    const out = [['date', 'Вибрати дату вручну']];
+    if (nextLessonFor(subjectKey, base, 'any')) out.push(['any', 'Наступна пара']);
+    for (const [k, title] of KIND_MODES) if (nextLessonFor(subjectKey, base, k)) out.push([k, title]);
+    return out;
+  }
+  const dueModeOptions = (subjectKey, base, cur) => dueModes(subjectKey, base)
+    .map(([v, t]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  function dueHint(subjectKey, base, mode) {
+    if (mode === 'date') return '';
+    const l = nextLessonFor(subjectKey, base, mode);
+    return l ? `${kindTitle(l)}: ${weekdayName(l.start)}, ${dayMonth(l.start)}, ${hm(l.start)}` : 'У розкладі такої пари не знайдено — оберіть дату вручну.';
+  }
+  /** Оновлює дату й список варіантів у відкритій формі після зміни предмета чи способу вибору дати. */
+  function hwRefreshDue(s) {
+    const subj = $('[name=subject]', s.el).value;
+    const modeSel = $('[name=dueMode]', s.el);
+    const dateInp = $('[name=due]', s.el);
+    const base = dueBase(s.item);
+    let mode = modeSel.value;
+    const modes = dueModes(subj, base);
+    if (!modes.some(([v]) => v === mode)) mode = 'date';
+    modeSel.innerHTML = dueModeOptions(subj, base, mode);
+    modeSel.value = mode;
+    s.item.dueMode = mode;
+    const auto = mode !== 'date';
+    if (auto) {
+      const l = nextLessonFor(subj, base, mode);
+      if (l) dateInp.value = toInput(sod(l.start));
+    }
+    dateInp.readOnly = auto;
+    dateInp.tabIndex = auto ? -1 : 0;
+    dateInp.style.pointerEvents = auto ? 'none' : '';
+    dateInp.style.opacity = auto ? '.7' : '';
+    $('[data-role="dueHint"]', s.el).textContent = dueHint(subj, base, mode);
+  }
   const newHomework = (l) => ({ id: null, subjectKey: l.subjectKey, lessonID: l.id, text: '', due: dueDateAfter(l) });
   const blankHomework = () => ({ id: null, subjectKey: subjectKeys()[0] || '', lessonID: null, text: '', due: sod(addDays(new Date(), 1)) });
 
   const hwDone = (h) => S.done.has(h.id);
   const listedHomework = () => S.homework.filter((h) => h.status === 'approved' || h.authorID === (S.user && S.user.id));
-  const moderationQueue = () => (isAdmin() ? S.homework.filter((h) => h.status === 'pending').sort((a, b) => a.created - b.created) : []);
-  const canEdit = (h) => isAdmin() || (h.authorID === (S.user && S.user.id) && h.status !== 'approved');
+  const moderationQueue = () => (isMod() ? S.homework.filter((h) => h.status === 'pending').sort((a, b) => a.created - b.created) : []);
+  const canEdit = (h) => isMod() || (h.authorID === (S.user && S.user.id) && h.status !== 'approved');
 
   function pendingPrompts() {
     const now = new Date();
@@ -302,10 +349,10 @@
     return S.homework.some((h) => h.status !== 'rejected' && (h.lessonID === l.id || (h.subjectKey === l.subjectKey && h.created >= l.start)));
   }
 
-  /** «Нічого не задали»: у адміністратора плашка зникає в усіх, у решти — лише на їхньому пристрої. */
+  /** «Нічого не задали»: у адміна/старости плашка зникає в усіх, у решти — лише на їхньому пристрої. */
   async function answerNone(lessonId) {
     markAnswered(lessonId);
-    if (isAdmin()) {
+    if (isMod()) {
       S.noHw.add(lessonId);
       try { await api('POST', `/api/lessons/${encodeURIComponent(lessonId)}/no-homework`); } catch (e) { toast(e.message); S.noHw.delete(lessonId); }
     }
@@ -355,7 +402,7 @@
   function nextCard() {
     const now = new Date();
     const l = nextLesson(now);
-    if (!l) return card('<div class="muted">Найближчих пар у розкладі немає. Адміністратор може завантажити новий розклад у налаштуваннях.</div>');
+    if (!l) return card('<div class="muted">Найближчих пар у розкладі немає. Адміністратор чи староста можуть завантажити новий розклад у налаштуваннях.</div>');
     const ongoing = l.start <= now;
     const url = joinURL(l.subjectKey);
     const color = subjColor(l.subjectKey);
@@ -515,9 +562,9 @@
   function viewToday() {
     let h = installHint();
     if (!S.lessons.length) {
-      h += card(`<div class="next-title">Розкладу ще немає</div><div class="muted">${isAdmin()
+      h += card(`<div class="next-title">Розкладу ще немає</div><div class="muted">${isMod()
         ? 'Відкрийте вкладку «Налаштування» і завантажте файл розкладу (.xls) — його одразу побачать усі студенти.'
-        : 'Адміністратор ще не завантажив розклад. Зайдіть пізніше або натисніть оновлення вгорі.'}</div>`);
+        : 'Адміністратор чи староста ще не завантажили розклад. Зайдіть пізніше або натисніть оновлення вгорі.'}</div>`);
       return h;
     }
     h += nextCard();
@@ -622,14 +669,14 @@
     let h = '';
 
     h += `<div><div class="label" style="margin:0 0 6px 4px">Акаунт</div><div class="list">
-      <div class="row"><span>${esc(S.user.fullName)}</span>${isAdmin() ? badge('АДМІН', 'accent') : ''}</div>
+      <div class="row"><span>${esc(S.user.fullName)}</span>${roleBadge(S.user)}</div>
       ${S.syncError ? `<div class="err">${esc(S.syncError)}</div>` : ''}
       <button class="row" data-act="sync"><span>Оновити дані</span></button>
       <button class="row" data-act="share"><span>Поділитися посиланням на щоденник</span></button>
       <button class="row" data-act="logout"><span style="color:var(--red)">Вийти</span></button>
-    </div>${!isAdmin() ? '<div class="foot">Розклад, посилання на пари й імена викладачів налаштовує адміністратор.</div>' : ''}</div>`;
+    </div>${!isAdmin() ? '<div class="foot">Посилання на пари й імена викладачів налаштовує адміністратор.</div>' : ''}</div>`;
 
-    if (isAdmin()) {
+    if (isMod()) {
       h += `<div><div class="label" style="margin:0 0 6px 4px">Розклад</div><div class="list">
         <div>${S.lessons.length
           ? `${S.scheduleTitle ? `<div>${esc(S.scheduleTitle)}</div>` : ''}<div class="muted small">Пар у розкладі: ${S.lessons.length}${scheduleRange()}</div>`
@@ -642,9 +689,9 @@
       const q = moderationQueue().length;
       h += `<div><div class="label" style="margin:0 0 6px 4px">Керування</div><div class="list">
         <button class="row" data-act="moderation"><span>Домашнє на підтвердження</span>${q ? badge(String(q), 'warn') : ''}</button>
-        <button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
+        ${isAdmin() ? `<button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
         <button class="row" data-act="teachers"><span>Викладачі</span></button>
-        <button class="row" data-act="users"><span>Учасники й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>
+        <button class="row" data-act="users"><span>Учасники, ролі й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>` : ''}
       </div></div>`;
     }
 
@@ -827,10 +874,10 @@
         <div class="muted small" data-role="msg"></div>
         <button class="btn deep" data-act="saveLink" data-key="${esc(l.subjectKey)}">Зберегти посилання</button>`) : ''}
       ${card(`
-        <span class="label">Домашнє після цієї пари</span>
+        <span class="label">Домашнє на цю пару</span>
         ${items.length ? items.map((h) => `<div><div class="txt" style="white-space:pre-wrap">${esc(h.text)}</div>${attHTML(h)}
           <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`).join('') : '<div class="muted">Нічого не записано</div>'}
-        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isAdmin() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
+        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isMod() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
   }
 
   function openHomeworkView(h0) {
@@ -864,12 +911,15 @@
       closeLabel: 'Скасувати',
       item, editing, uploading: 0,
       title: editing ? 'Домашнє' : 'Нове домашнє',
-      right: () => `<button class="link" data-act="hwSave">${editing ? 'Зберегти' : isAdmin() ? 'Додати' : 'Надіслати'}</button>`,
+      right: () => `<button class="link" data-act="hwSave">${editing ? 'Зберегти' : isMod() ? 'Додати' : 'Надіслати'}</button>`,
       render: () => `<div class="form">
-        <label><span class="label">Предмет</span><select class="field" name="subject">
+        <label><span class="label">Предмет</span><select class="field" name="subject" data-chg="hwDue">
           ${keys.map((k) => `<option value="${esc(k)}" ${k === item.subjectKey ? 'selected' : ''}>${esc(subjName(k))}</option>`).join('')}</select></label>
         <label><span class="label">Що задали</span><textarea class="field" name="text" rows="5" placeholder="Що задали">${esc(item.text)}</textarea></label>
-        <label><span class="label">Здати до</span><input class="field" type="date" name="due" value="${toInput(item.due)}"></label>
+        <label><span class="label">Здати до</span>
+          <select class="field" name="dueMode" data-chg="hwDue">${dueModeOptions(item.subjectKey, dueBase(item), item.dueMode || 'date')}</select></label>
+        <input class="field" type="date" name="due" value="${toInput(item.due)}" ${(item.dueMode || 'date') !== 'date' ? 'readonly tabindex="-1" style="pointer-events:none;opacity:.7"' : ''}>
+        <div class="muted small" data-role="dueHint">${esc(dueHint(item.subjectKey, dueBase(item), item.dueMode || 'date'))}</div>
         <div class="att-edit">
           <span class="label">Посилання</span>
           ${item.links.map((u, i) => `<div class="att-row"><a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a><button type="button" class="link" data-act="linkDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}
@@ -878,8 +928,8 @@
           ${item.images.length || sheet.uploading ? `<div class="thumbs">${item.images.map((id, i) => `<div class="thumb"><button type="button" class="thumb-btn" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id)}</button><button type="button" class="x" data-act="imgDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}${sheet.uploading ? '<div class="thumb"><span class="spin"></span></div>' : ''}</div>` : ''}
           ${item.images.length < MAX_IMAGES ? `<label class="btn deep att-pick">Додати зображення<input type="file" accept="image/*" multiple data-chg="hwImages" hidden></label>` : ''}
         </div>
-        ${!isAdmin() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор.</div>' : ''}
-        ${editing && cur && cur.status === 'rejected' ? '<div class="muted small">Адміністратор відхилив це завдання. Виправте його й надішліть знову.</div>' : ''}
+        ${!isMod() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор, староста чи заступник.</div>' : ''}
+        ${editing && cur && cur.status === 'rejected' ? '<div class="muted small">Це завдання відхилили. Виправте його й надішліть знову.</div>' : ''}
         <div class="err" data-role="err"></div>
         ${!editing && item.lessonID ? `<button class="btn deep" data-act="hwNone" data-lesson="${esc(item.lessonID)}">Нічого не задали</button>` : ''}
         ${editing && canEdit(cur || item) ? '<button class="btn red" data-act="hwDelete">Видалити</button>' : ''}
@@ -947,9 +997,10 @@
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
       const list = [...s.users].sort((a, b) => (b.pending.length > 0) - (a.pending.length > 0) || a.fullName.localeCompare(b.fullName, 'uk'));
-      return '<div class="muted small">Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
+      return '<div class="muted small">Староста й заступник можуть підтверджувати домашнє та завантажувати розклад. Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
         list.map((u) => card(`
-          <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${u.isAdmin ? badge('АДМІН', 'accent') : ''}</div>
+          <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${roleBadge(u)}</div>
+          ${u.isAdmin ? '' : `<label><span class="label">Роль</span><select class="field" data-chg="userRole" data-user="${esc(u.id)}"><option value="" ${!u.role ? 'selected' : ''}>Студент</option><option value="starosta" ${u.role === 'starosta' ? 'selected' : ''}>Староста</option><option value="deputy" ${u.role === 'deputy' ? 'selected' : ''}>Заступник старости</option></select></label>`}
           ${u.pending.length ? `<div class="label" style="color:var(--warn)">Запити на новий пристрій</div>` + u.pending.map((p) => `
             <div class="dev"><div class="dn">${esc(p.label)}<div class="muted small">${esc(fWhen(p.requestedAt))}</div></div>
               <div style="display:flex;gap:6px"><button class="btn green small" data-act="devApprove" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Підтвердити</button>
@@ -1292,7 +1343,7 @@
           else await api('POST', '/api/homework', body);
           if (s.item.lessonID) markAnswered(s.item.lessonID);
           closeSheet();
-          toast(!s.editing && !isAdmin() ? 'Надіслано на підтвердження адміністратору' : 'Збережено');
+          toast(!s.editing && !isMod() ? 'Надіслано на підтвердження' : 'Збережено');
           await sync();
         } catch (e) { err.textContent = e.message; }
       });
@@ -1462,6 +1513,14 @@
       saveSettings();
       pushSettingsChanged();
       if (el.dataset.key === 'notificationsEnabled' && el.checked && S.push.supported && !S.push.subscribed) enablePush();
+    } else if (el.dataset.chg === 'hwDue') {
+      const s = sheetOf(el);
+      if (s && s.item) hwRefreshDue(s);
+    } else if (el.dataset.chg === 'userRole') {
+      const s = sheetOf(el);
+      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/role`, { role: el.value })
+        .then(() => { toast('Роль змінено'); if (s && s.reload) s.reload(); })
+        .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
     } else if (el.dataset.chg === 'notifyField') {
       S.notify[el.dataset.key] = el.value;
     } else if (el.dataset.chg === 'hwImages' && el.files && el.files.length) {
@@ -1532,7 +1591,7 @@
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
     else if (p.has('answered')) { answerNone(p.get('answered')); toast('Добре, відмітили'); }
     else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
-    else if (p.get('tab') === 'moderation') { if (isAdmin()) { S.tab = 'homework'; render(); openModeration(); } }
+    else if (p.get('tab') === 'moderation') { if (isMod()) { S.tab = 'homework'; render(); openModeration(); } }
     else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
   }
 
