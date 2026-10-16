@@ -243,3 +243,6 @@ img.broken { opacity: .35; }
 .thumb-btn { position: absolute; inset: 0; padding: 0; }
 .full-btn { display: block; width: 100%; padding: 0; }
 .full-btn img.full { max-height: 70vh; object-fit: contain; background: var(--deep); }
+
+.hw-item{display:flex;flex-direction:column;gap:6px}
+.hw-item+.hw-item{border-top:1px solid var(--line,rgba(128,128,128,.25));padding-top:10px}

@@ -129,8 +129,24 @@
 
   // ───────────── дані ─────────────
 
-  function applySync(r) {
+  const ROLE_NOTICE = {
+    starosta: 'Вас призначено старостою. Тепер ви можете завантажувати розклад і підтверджувати домашнє.',
+    deputy: 'Вас призначено заступником старости. Тепер ви можете завантажувати розклад і підтверджувати домашнє.',
+    '': 'Вашу роль знято — ви знову студент.',
+  };
+
+  function applySync(r, fromCache) {
+    const prevRole = S.user ? (S.user.isAdmin ? 'admin' : S.user.role || '') : null;
     S.user = r.user;
+    if (!fromCache) {
+      // Роль змінилась (адміністратор призначив або зняв) — показуємо повідомлення й запам'ятовуємо останню відому.
+      const nowRole = r.user.isAdmin ? 'admin' : r.user.role || '';
+      const known = LS.get('knownRole:' + r.user.id, prevRole);
+      if (known !== null && known !== nowRole && nowRole !== 'admin') {
+        setTimeout(() => toast(ROLE_NOTICE[nowRole] || ROLE_NOTICE['']), 300);
+      }
+      LS.set('knownRole:' + r.user.id, nowRole);
+    }
     S.lessons = (r.lessons || []).map((l) => Object.assign({}, l, { start: new Date(l.start), end: new Date(l.end) }));
     S.subjects = r.subjects || {};
     S.teachers = r.teachers || {};
@@ -332,6 +348,21 @@
   const newHomework = (l) => ({ id: null, subjectKey: l.subjectKey, lessonID: l.id, text: '', due: dueDateAfter(l) });
   const blankHomework = () => ({ id: null, subjectKey: subjectKeys()[0] || '', lessonID: null, text: '', due: sod(addDays(new Date(), 1)) });
 
+  /**
+   * Домашнє, що стосується конкретної пари:
+   *  given — задали саме на цій парі (прив'язане до неї або внесене з цього предмета в день пари);
+   *  due   — треба здати на цю пару (термін збігається з днем пари).
+   */
+  function lessonHomework(l) {
+    const all = S.homework.filter((h) => h.status === 'approved' || h.authorID === (S.user && S.user.id));
+    const given = all.filter((h) => h.lessonID === l.id || (!h.lessonID && h.subjectKey === l.subjectKey && sameDay(h.created, l.start)))
+      .sort((a, b) => a.created - b.created);
+    const ids = new Set(given.map((h) => h.id));
+    const due = all.filter((h) => !ids.has(h.id) && h.subjectKey === l.subjectKey && sameDay(h.due, l.start))
+      .sort((a, b) => a.created - b.created);
+    return { given, due };
+  }
+
   const hwDone = (h) => S.done.has(h.id);
   const listedHomework = () => S.homework.filter((h) => h.status === 'approved' || h.authorID === (S.user && S.user.id));
   const moderationQueue = () => (isMod() ? S.homework.filter((h) => h.status === 'pending').sort((a, b) => a.created - b.created) : []);
@@ -380,11 +411,14 @@
     const now = new Date();
     const ongoing = l.start <= now && now < l.end;
     const finished = l.end <= now;
+    const lh = lessonHomework(l);
+    const hwCount = lh.given.length + lh.due.length;
     return `<button class="lesson ${finished ? 'dim' : ''}" data-act="lesson" data-id="${esc(l.id)}">
       <div class="lt"><b>${hm(l.start)}</b><span>${hm(l.end)}</span></div>
       <i class="bar" style="background:${subjColor(l.subjectKey)}"></i>
       <div class="lm"><div class="ln">${esc(subjName(l.subjectKey))}</div>
         <div class="ls">${l.pair} пара · ${esc(kindTitle(l))} · ${esc(placeTitle(l))}</div></div>
+      ${hwCount ? badge('ДЗ ' + hwCount, 'warn') : ''}
       ${ongoing ? badge('ЗАРАЗ') : l.isRemote ? `<span class="muted">${ic('video', 20)}</span>` : ''}
     </button>`;
   }
@@ -674,7 +708,7 @@
       <button class="row" data-act="sync"><span>Оновити дані</span></button>
       <button class="row" data-act="share"><span>Поділитися посиланням на щоденник</span></button>
       <button class="row" data-act="logout"><span style="color:var(--red)">Вийти</span></button>
-    </div>${!isAdmin() ? '<div class="foot">Посилання на пари й імена викладачів налаштовує адміністратор.</div>' : ''}</div>`;
+    </div>${!isMod() ? '<div class="foot">Посилання на пари й імена викладачів налаштовують адміністратор і староста.</div>' : ''}</div>`;
 
     if (isMod()) {
       h += `<div><div class="label" style="margin:0 0 6px 4px">Розклад</div><div class="list">
@@ -689,9 +723,9 @@
       const q = moderationQueue().length;
       h += `<div><div class="label" style="margin:0 0 6px 4px">Керування</div><div class="list">
         <button class="row" data-act="moderation"><span>Домашнє на підтвердження</span>${q ? badge(String(q), 'warn') : ''}</button>
-        ${isAdmin() ? `<button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
+        <button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
         <button class="row" data-act="teachers"><span>Викладачі</span></button>
-        <button class="row" data-act="users"><span>Учасники, ролі й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>` : ''}
+        ${isAdmin() ? `<button class="row" data-act="users"><span>Учасники, ролі й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>` : ''}
       </div></div>`;
     }
 
@@ -855,7 +889,9 @@
     if (!l) return '<div class="muted">Пару не знайдено</div>';
     const url = joinURL(l.subjectKey);
     const color = subjColor(l.subjectKey);
-    const items = listedHomework().filter((h) => h.lessonID === l.id);
+    const lh = lessonHomework(l);
+    const hwItem = (h) => `<div class="hw-item"><div class="txt" style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
+          <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`;
     return `
       ${card(`
         <div class="hstack"><div class="avatar" style="background:${color}38;color:${color}">${esc(l.subjectKey.charAt(0).toUpperCase())}</div>
@@ -867,17 +903,19 @@
         <div class="info"><span>Де</span><span>${esc(placeTitle(l))}</span></div>
         ${l.teacher ? `<div class="info"><span>Викладач</span><span>${esc(teacherName(l.teacher))}</span></div>` : ''}`)}
       ${url ? `<a class="btn green big" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${ic('video', 20)} Приєднатися до пари</a>` : ''}
-      ${isAdmin() ? card(`
+      ${isMod() ? card(`
         <span class="label">Посилання на пару</span>
         <input class="field" name="link" type="url" inputmode="url" autocapitalize="none" autocorrect="off" placeholder="https://zoom.us/j/… або Meet / Teams" value="${esc((S.subjects[l.subjectKey] && S.subjects[l.subjectKey].link) || '')}">
         <div class="muted small">Посилання діє для всього предмета й одразу з’являється в усіх студентів.</div>
         <div class="muted small" data-role="msg"></div>
         <button class="btn deep" data-act="saveLink" data-key="${esc(l.subjectKey)}">Зберегти посилання</button>`) : ''}
       ${card(`
-        <span class="label">Домашнє на цю пару</span>
-        ${items.length ? items.map((h) => `<div><div class="txt" style="white-space:pre-wrap">${esc(h.text)}</div>${attHTML(h)}
-          <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`).join('') : '<div class="muted">Нічого не записано</div>'}
-        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isMod() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
+        <span class="label">Домашнє на пару · ${dayMonth(l.start)}</span>
+        ${lh.given.length ? lh.given.map(hwItem).join('') : '<div class="muted">На цій парі нічого не записано</div>'}
+        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isMod() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}
+      ${lh.due.length ? card(`
+        <span class="label">Потрібно здати на цю пару</span>
+        ${lh.due.map(hwItem).join('')}`) : ''}`;
   }
 
   function openHomeworkView(h0) {
@@ -1602,13 +1640,17 @@
   function boot() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
-      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'route') routeFromUrl(e.data.url); });
+      navigator.serviceWorker.addEventListener('message', (e) => {
+        if (!e.data) return;
+        if (e.data.type === 'route') routeFromUrl(e.data.url);
+        else if (e.data.type === 'sync' && S.user) sync();
+      });
     }
     if (location.search) S.pendingRoute = location.search;
 
     if (S.token) {
       const cached = LS.get('cache', null);
-      if (cached) { try { applySync(cached); } catch (e) { /* зіпсований кеш */ } }
+      if (cached) { try { applySync(cached, true); } catch (e) { /* зіпсований кеш */ } }
     }
     render();
     refreshPushState();

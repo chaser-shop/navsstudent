@@ -362,6 +362,34 @@ async function notifyPending(hw) {
   }
 }
 
+/** Людині, якій адміністратор змінив роль: сповіщення на всі її пристрої (незалежно від налаштувань нагадувань). */
+async function notifyRole(target, role) {
+  try {
+    const subs = await pushSubs.find({ userId: target._id }).toArray();
+    if (!subs.length) return 0;
+    const payload = role
+      ? {
+        title: 'Вас призначено на роль',
+        body: `Ви успішно призначені: ${ROLES[role]}. Тепер вам доступні розклад, підтвердження домашнього, предмети й викладачі.`,
+        tag: 'role-' + target._id,
+        data: { url: '/?tab=settings' },
+        ttl: 86400,
+      }
+      : {
+        title: 'Роль змінено',
+        body: 'Ваша роль у щоденнику знята — ви знову студент.',
+        tag: 'role-' + target._id,
+        data: { url: '/?tab=settings' },
+        ttl: 86400,
+      };
+    const results = await Promise.all(subs.map((s) => sendPush(s, payload)));
+    return results.filter((r) => r.ok).length;
+  } catch (e) {
+    console.error('notifyRole:', e);
+    return 0;
+  }
+}
+
 async function notifyDeviceRequest(user, label) {
   try {
     const admins = await users.find({ isAdmin: true }).toArray();
@@ -582,20 +610,20 @@ route('POST', '/api/lessons/:id/no-homework', async ({ params }) => {
   return ok();
 }, { mod: true });
 
-// — предмети й викладачі (адмін)
+// — предмети й викладачі (адмін, староста, заступник)
 route('PUT', '/api/subjects', async ({ body }) => {
   const key = str(body.key, 100);
   if (!key) throw new HttpError(400, 'Не вказано предмет.');
   await subjects.updateOne({ _id: key }, { $set: { fullName: str(body.fullName, 200), link: cleanLink(body.link) } }, { upsert: true });
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 route('PUT', '/api/teachers', async ({ body }) => {
   const key = str(body.key, 200);
   if (!key) throw new HttpError(400, 'Не вказано викладача.');
   await teachers.updateOne({ _id: key }, { $set: { fullName: str(body.fullName, 200) } }, { upsert: true });
   return ok();
-}, { admin: true });
+}, { mod: true });
 
 // — домашнє
 const MAX_LINKS = 5;
@@ -874,8 +902,11 @@ route('POST', '/api/admin/users/:id/role', async ({ params, body }) => {
   const target = await users.findOne({ _id: params.id });
   if (!target) throw new HttpError(404, 'Користувача не знайдено.');
   if (target.isAdmin) throw new HttpError(400, 'Адміністратору роль не потрібна.');
+  const prev = ROLES[target.role] ? target.role : '';
   await users.updateOne({ _id: target._id }, role ? { $set: { role } } : { $unset: { role: '' } });
-  return ok();
+  // Сповіщаємо лише якщо роль справді змінилась.
+  const notified = prev !== role ? await notifyRole(target, role) : 0;
+  return { notified };
 }, { admin: true });
 
 route('DELETE', '/api/admin/users/:id', async ({ params, user }) => {
