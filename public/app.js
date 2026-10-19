@@ -684,7 +684,7 @@
     }
     const groups = new Map();
     for (const it of g.items) {
-      const k = it.subject || 'Без предмета';
+      const k = (it.subject || 'Без предмета') + (it.period ? ' · ' + it.period : '');
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k).push(it);
     }
@@ -696,7 +696,7 @@
       <div class="muted small">Перевірка нових оцінок — щодня о 20:00 за київським часом.${g.lastCheck ? ' Остання: ' + esc(dayMonth(g.lastCheck) + ', ' + hm(g.lastCheck)) + '.' : ''}</div>
       <div class="${g.cls} small" ${g.msg ? '' : 'hidden'}>${esc(g.msg)}</div>
       <button class="btn" data-act="gradesCheck" ${g.checking ? 'disabled' : ''}>${g.checking ? '<span class="spin"></span>' : 'Перевірити зараз'}</button>`);
-    if (!g.items.length) return h + '<div class="foot">У колекції grades поки немає жодної оцінки.</div>';
+    if (!g.items.length) return h + `<div class="foot">${g.docs ? `У колекції grades (база «${esc(g.db)}») є документів: ${g.docs}, але масиву grades із оцінками в них немає.` : `У колекції grades (база «${esc(g.db)}») немає жодного документа. Якщо оцінки лежать в іншій базі, вкажіть її у змінній GRADES_DB.`}</div>`;
     for (const name of names) {
       const list = groups.get(name);
       const nums = list.map((x) => numGrade(x.value)).filter((n) => n != null);
@@ -716,6 +716,7 @@
       const r = await api('GET', '/api/admin/grades');
       S.grades.items = r.items.map((x) => ({ ...x, date: x.date ? new Date(x.date) : null }));
       S.grades.lastCheck = r.lastCheck ? new Date(r.lastCheck) : null;
+      S.grades.docs = r.docs; S.grades.db = r.db;
     } catch (e) { S.grades.err = e.message; }
     render();
   }
