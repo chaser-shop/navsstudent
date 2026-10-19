@@ -37,7 +37,11 @@
     pushEnsured: false,
     installEvent: null,
     needPassword: false,
+    deviceRequests: 0,
+    noHw: new Set(),
     schedMsg: { text: '', cls: 'muted' },
+    grades: { items: null, lastCheck: null, err: '', checking: false, msg: '', cls: 'muted' },
+    notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
 
   // ───────────── дати ─────────────
@@ -71,6 +75,7 @@
   const ICONS = {
     bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
     calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+    bell: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',
     book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
     video: '<path d="M23 7l-7 5 7 5z"/><rect x="1" y="5" width="15" height="14" rx="2"/>',
@@ -82,6 +87,7 @@
     refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/>',
     left: '<path d="M15 18l-6-6 6-6"/>',
     right: '<path d="M9 18l6-6-6-6"/>',
+    star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
   };
   const ic = (name, size = 22) =>
     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -125,12 +131,38 @@
 
   // ───────────── дані ─────────────
 
-  function applySync(r) {
+  const ROLE_NOTICE = {
+    starosta: 'Вас призначено старостою. Тепер ви можете завантажувати розклад і підтверджувати домашнє.',
+    deputy: 'Вас призначено заступником старости. Тепер ви можете завантажувати розклад і підтверджувати домашнє.',
+    '': 'Вашу роль знято — ви знову студент.',
+  };
+
+  function applySync(r, fromCache) {
+    const prevRole = S.user ? (S.user.isAdmin ? 'admin' : S.user.role || '') : null;
     S.user = r.user;
+    if (!fromCache) {
+      // Роль змінилась (адміністратор призначив або зняв) — показуємо повідомлення й запам'ятовуємо останню відому.
+      const nowRole = r.user.isAdmin ? 'admin' : r.user.role || '';
+      const known = LS.get('knownRole:' + r.user.id, prevRole);
+      if (known !== null && known !== nowRole && nowRole !== 'admin') {
+        setTimeout(() => toast(ROLE_NOTICE[nowRole] || ROLE_NOTICE['']), 300);
+      }
+      LS.set('knownRole:' + r.user.id, nowRole);
+    }
     S.lessons = (r.lessons || []).map((l) => Object.assign({}, l, { start: new Date(l.start), end: new Date(l.end) }));
     S.subjects = r.subjects || {};
     S.teachers = r.teachers || {};
     S.scheduleTitle = r.scheduleTitle || '';
+    S.deviceRequests = r.deviceRequests || 0;
+    S.noHw = new Set(r.noHomework || []);
+    if (Array.isArray(r.answered)) {
+      // Відповіді, дані на іншому пристрої, підтягуються з сервера; локальні, яких там ще немає, — відправляються туди.
+      const server = new Set(r.answered);
+      const extra = [...S.answered].filter((id) => !server.has(id));
+      r.answered.forEach((id) => S.answered.add(id));
+      LS.set('answered', [...S.answered]);
+      if (extra.length && S.token) api('POST', '/api/answered', { ids: extra }).catch(() => {});
+    }
     const ids = new Set();
     S.homework = (r.homework || []).map((h) => {
       ids.add(h.id);
@@ -149,7 +181,8 @@
       applySync(r);
       LS.set('cache', r);
       S.syncError = '';
-      ensurePush();
+      await ensurePush();
+      maybeAskPush();
     } catch (e) {
       if (e.status !== 401) S.syncError = e.message;
     } finally {
@@ -166,7 +199,11 @@
   }
 
   async function login(fullName, password) {
-    const r = await api('POST', '/api/auth/login', { fullName, deviceId, password: password || undefined });
+    const r = await api('POST', '/api/auth/login', {
+      fullName, deviceId, password: password || undefined,
+      deviceLabel: window.DeviceInfo ? DeviceInfo.label() : undefined,
+    });
+    stopPending();
     S.token = null;
     resetLocal();
     S.token = r.token;
@@ -176,8 +213,44 @@
     await sync();
   }
 
+  // Новий пристрій людини, в якої вже є інші: запит іде адміністратору, а ми чекаємо підтвердження.
+  let pendingTimer = null;
+  function stopPending() { clearInterval(pendingTimer); pendingTimer = null; }
+
+  function setLoginMsg(text, kind) {
+    const el = $('#loginErr');
+    if (!el) return;
+    if (kind === 'wait') {
+      el.className = '';
+      el.innerHTML = `<div class="info-box"><span class="spin"></span><div>${esc(text)}</div></div>`;
+    } else {
+      el.className = kind === 'err' ? 'err' : '';
+      el.textContent = text;
+    }
+  }
+
+  function startPending(name) {
+    stopPending();
+    pendingTimer = setInterval(async () => {
+      const f = $('#fullName');
+      if (S.user || !f || f.value.replace(/\s+/g, ' ').trim() !== name) { stopPending(); return; }
+      try {
+        const r = await api('POST', '/api/auth/device-status', { fullName: name, deviceId });
+        if (r.status === 'approved') {
+          stopPending();
+          setLoginMsg('Підтверджено! Входимо…', 'ok');
+          try { await login(name, ''); } catch (e) { setLoginMsg(e.message, 'err'); }
+        } else if (r.status === 'none') {
+          stopPending();
+          setLoginMsg('Адміністратор відхилив запит на цей пристрій. Можна надіслати його ще раз, натиснувши «Увійти».', 'err');
+        }
+      } catch (e) { /* немає зв’язку — спробуємо ще раз */ }
+    }, 6000);
+  }
+
   let loginNotice = '';
   function forceSignOut(notice) {
+    removePushAsk();
     S.token = null; S.user = null;
     LS.del('token');
     resetLocal();
@@ -197,6 +270,10 @@
   // ───────────── доменна логіка ─────────────
 
   const isAdmin = () => !!(S.user && S.user.isAdmin);
+  /** Адмін, староста або заступник: підтверджують домашнє й завантажують розклад. */
+  const isMod = () => !!(S.user && (S.user.isAdmin || S.user.canModerate));
+  const ROLE_TITLES = { starosta: 'Староста', deputy: 'Заступник старости' };
+  const roleBadge = (u) => (u && u.isAdmin ? badge('АДМІН', 'accent') : u && ROLE_TITLES[u.role] ? badge(ROLE_TITLES[u.role].toUpperCase(), 'accent') : '');
   const lessonById = (id) => S.lessons.find((l) => l.id === id);
   const lessonsOn = (day) => S.lessons.filter((l) => sameDay(l.start, day)).sort((a, b) => a.start - b.start);
   const nextLesson = (now) => S.lessons.filter((l) => l.end > now).sort((a, b) => a.start - b.start)[0];
@@ -227,21 +304,99 @@
     const next = S.lessons.filter((l) => l.subjectKey === lesson.subjectKey && l.start > lesson.end).sort((a, b) => a.start - b.start)[0];
     return next ? sod(next.start) : sod(addDays(lesson.start, 1));
   }
+  // «Здати на наступний семінар / практичну / лекцію»: дату знаходимо в розкладі самі.
+  const KIND_MODES = [['Сем', 'Наступний семінар'], ['Пз', 'Наступна практична'], ['Лк', 'Наступна лекція']];
+  const dueBase = (item) => { const l = item.lessonID && lessonById(item.lessonID); return l ? l.end : new Date(); };
+  function nextLessonFor(subjectKey, base, mode) {
+    return S.lessons.filter((l) => l.subjectKey === subjectKey && l.start > base && (mode === 'any' || l.kind === mode))
+      .sort((a, b) => a.start - b.start)[0] || null;
+  }
+  function dueModes(subjectKey, base) {
+    const out = [['date', 'Вибрати дату вручну']];
+    if (nextLessonFor(subjectKey, base, 'any')) out.push(['any', 'Наступна пара']);
+    for (const [k, title] of KIND_MODES) if (nextLessonFor(subjectKey, base, k)) out.push([k, title]);
+    return out;
+  }
+  const dueModeOptions = (subjectKey, base, cur) => dueModes(subjectKey, base)
+    .map(([v, t]) => `<option value="${esc(v)}" ${v === cur ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  function dueHint(subjectKey, base, mode) {
+    if (mode === 'date') return '';
+    const l = nextLessonFor(subjectKey, base, mode);
+    return l ? `${kindTitle(l)}: ${weekdayName(l.start)}, ${dayMonth(l.start)}, ${hm(l.start)}` : 'У розкладі такої пари не знайдено — оберіть дату вручну.';
+  }
+  /** Оновлює дату й список варіантів у відкритій формі після зміни предмета чи способу вибору дати. */
+  function hwRefreshDue(s) {
+    const subj = $('[name=subject]', s.el).value;
+    const modeSel = $('[name=dueMode]', s.el);
+    const dateInp = $('[name=due]', s.el);
+    const base = dueBase(s.item);
+    let mode = modeSel.value;
+    const modes = dueModes(subj, base);
+    if (!modes.some(([v]) => v === mode)) mode = 'date';
+    modeSel.innerHTML = dueModeOptions(subj, base, mode);
+    modeSel.value = mode;
+    s.item.dueMode = mode;
+    const auto = mode !== 'date';
+    if (auto) {
+      const l = nextLessonFor(subj, base, mode);
+      if (l) dateInp.value = toInput(sod(l.start));
+    }
+    dateInp.readOnly = auto;
+    dateInp.tabIndex = auto ? -1 : 0;
+    dateInp.style.pointerEvents = auto ? 'none' : '';
+    dateInp.style.opacity = auto ? '.7' : '';
+    $('[data-role="dueHint"]', s.el).textContent = dueHint(subj, base, mode);
+  }
   const newHomework = (l) => ({ id: null, subjectKey: l.subjectKey, lessonID: l.id, text: '', due: dueDateAfter(l) });
   const blankHomework = () => ({ id: null, subjectKey: subjectKeys()[0] || '', lessonID: null, text: '', due: sod(addDays(new Date(), 1)) });
 
+  /**
+   * Домашнє, що стосується конкретної пари:
+   *  given — задали саме на цій парі (прив'язане до неї або внесене з цього предмета в день пари);
+   *  due   — треба здати на цю пару (термін збігається з днем пари).
+   */
+  function lessonHomework(l) {
+    const all = S.homework.filter((h) => h.status === 'approved' || h.authorID === (S.user && S.user.id));
+    const given = all.filter((h) => h.lessonID === l.id || (!h.lessonID && h.subjectKey === l.subjectKey && sameDay(h.created, l.start)))
+      .sort((a, b) => a.created - b.created);
+    const ids = new Set(given.map((h) => h.id));
+    const due = all.filter((h) => !ids.has(h.id) && h.subjectKey === l.subjectKey && sameDay(h.due, l.start))
+      .sort((a, b) => a.created - b.created);
+    return { given, due };
+  }
+
   const hwDone = (h) => S.done.has(h.id);
   const listedHomework = () => S.homework.filter((h) => h.status === 'approved' || h.authorID === (S.user && S.user.id));
-  const moderationQueue = () => (isAdmin() ? S.homework.filter((h) => h.status === 'pending').sort((a, b) => a.created - b.created) : []);
-  const canEdit = (h) => isAdmin() || (h.authorID === (S.user && S.user.id) && h.status !== 'approved');
+  const moderationQueue = () => (isMod() ? S.homework.filter((h) => h.status === 'pending').sort((a, b) => a.created - b.created) : []);
+  const canEdit = (h) => isMod() || (h.authorID === (S.user && S.user.id) && h.status !== 'approved');
 
   function pendingPrompts() {
     const now = new Date();
     const from = new Date(now.getTime() - 24 * 3600 * 1000);
-    return S.lessons.filter((l) => l.end <= now && l.end > from && !S.answered.has(l.id)).sort((a, b) => b.end - a.end);
+    return S.lessons.filter((l) => l.end <= now && l.end > from && !S.answered.has(l.id) && !S.noHw.has(l.id) && !hasHomeworkFor(l))
+      .sort((a, b) => b.end - a.end);
   }
 
-  function markAnswered(id) { S.answered.add(id); LS.set('answered', [...S.answered]); }
+  /** Домашнє з цієї пари вже записано (прив’язане до пари або внесене з цього предмета після її початку). */
+  function hasHomeworkFor(l) {
+    return S.homework.some((h) => h.status !== 'rejected' && (h.lessonID === l.id || (h.subjectKey === l.subjectKey && h.created >= l.start)));
+  }
+
+  /** «Нічого не задали»: у адміна/старости плашка зникає в усіх, у решти — лише на їхньому пристрої. */
+  async function answerNone(lessonId) {
+    markAnswered(lessonId);
+    if (isMod()) {
+      S.noHw.add(lessonId);
+      try { await api('POST', `/api/lessons/${encodeURIComponent(lessonId)}/no-homework`); } catch (e) { toast(e.message); S.noHw.delete(lessonId); }
+    }
+    render();
+  }
+
+  function markAnswered(id) {
+    S.answered.add(id);
+    LS.set('answered', [...S.answered]);
+    if (S.token) api('POST', `/api/lessons/${encodeURIComponent(id)}/answered`).catch(() => {});
+  }
   function toggleDone(id) {
     if (S.done.has(id)) S.done.delete(id); else S.done.add(id);
     LS.set('done', [...S.done]);
@@ -258,11 +413,14 @@
     const now = new Date();
     const ongoing = l.start <= now && now < l.end;
     const finished = l.end <= now;
+    const lh = lessonHomework(l);
+    const hwCount = lh.given.length + lh.due.length;
     return `<button class="lesson ${finished ? 'dim' : ''}" data-act="lesson" data-id="${esc(l.id)}">
       <div class="lt"><b>${hm(l.start)}</b><span>${hm(l.end)}</span></div>
       <i class="bar" style="background:${subjColor(l.subjectKey)}"></i>
       <div class="lm"><div class="ln">${esc(subjName(l.subjectKey))}</div>
         <div class="ls">${l.pair} пара · ${esc(kindTitle(l))} · ${esc(placeTitle(l))}</div></div>
+      ${hwCount ? badge('ДЗ ' + hwCount, 'warn') : ''}
       ${ongoing ? badge('ЗАРАЗ') : l.isRemote ? `<span class="muted">${ic('video', 20)}</span>` : ''}
     </button>`;
   }
@@ -280,7 +438,7 @@
   function nextCard() {
     const now = new Date();
     const l = nextLesson(now);
-    if (!l) return card('<div class="muted">Найближчих пар у розкладі немає. Адміністратор може завантажити новий розклад у налаштуваннях.</div>');
+    if (!l) return card('<div class="muted">Найближчих пар у розкладі немає. Адміністратор чи староста можуть завантажити новий розклад у налаштуваннях.</div>');
     const ongoing = l.start <= now;
     const url = joinURL(l.subjectKey);
     const color = subjColor(l.subjectKey);
@@ -319,14 +477,130 @@
       <button class="btn deep" data-act="hintOff">Зрозуміло</button>`, 'hint');
   }
 
+
+  // ───────────── вкладення до домашнього: посилання й зображення ─────────────
+
+  const MAX_LINKS = 5;
+  const MAX_IMAGES = 6;
+  const IMG = {};          // id → blob-URL (зображення завантажуються з токеном, тож <img src> напряму не підходить)
+  const imgLoading = {};
+  const imgFailed = new Set();
+
+  function loadImg(id) {
+    if (IMG[id]) return Promise.resolve(IMG[id]);
+    if (!imgLoading[id]) {
+      imgLoading[id] = fetch('/api/images/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.token } })
+        .then((r) => { if (!r.ok) throw new Error('img'); return r.blob(); })
+        .then((b) => { IMG[id] = URL.createObjectURL(b); return IMG[id]; })
+        .finally(() => { delete imgLoading[id]; });
+    }
+    return imgLoading[id];
+  }
+
+  function imgTag(id, cls) {
+    const c = cls ? ` class="${cls}"` : '';
+    if (IMG[id]) return `<img${c} src="${IMG[id]}" alt="">`;
+    if (imgFailed.has(id)) return `<img${c} class="broken" alt="Не завантажилось">`;
+    return `<img${c} data-img="${esc(id)}" alt="">`;
+  }
+
+  function hydrateImages() {
+    document.querySelectorAll('img[data-img]').forEach((el) => {
+      const id = el.dataset.img;
+      if (IMG[id]) { el.src = IMG[id]; el.removeAttribute('data-img'); return; }
+      if (!S.token) return;
+      loadImg(id)
+        .then((u) => { el.src = u; el.removeAttribute('data-img'); })
+        .catch(() => { imgFailed.add(id); el.removeAttribute('data-img'); el.classList.add('broken'); });
+    });
+  }
+  let hydrateQueued = false;
+  new MutationObserver(() => {
+    if (hydrateQueued) return;
+    hydrateQueued = true;
+    requestAnimationFrame(() => { hydrateQueued = false; hydrateImages(); });
+  }).observe(document.body, { childList: true, subtree: true });
+
+  function normLink(v) {
+    let t = String(v || '').trim();
+    if (!t) return '';
+    if (!t.includes('://')) t = 'https://' + t;
+    try {
+      const u = new URL(t);
+      return /^https?:$/.test(u.protocol) && u.hostname.includes('.') ? u.toString() : null;
+    } catch (e) { return null; }
+  }
+  const shortUrl = (u) => { const t = String(u).replace(/^https?:\/\/(www\.)?/, '').replace(/\/$/, ''); return t.length > 42 ? t.slice(0, 41) + '…' : t; };
+
+  function attHTML(h) {
+    const links = (h.links || []).map((u) => `<a class="chip-link" href="${esc(u)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(shortUrl(u))}</a>`).join('');
+    const imgs = (h.images || []).map((id) => `<button class="thumb" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id)}</button>`).join('');
+    return links || imgs ? `<div class="att">${links}${imgs ? `<div class="thumbs">${imgs}</div>` : ''}</div>` : '';
+  }
+
+  /** Стискає фото до розумного розміру (JPEG, довша сторона ≤ 1600 px) — щоб швидко вантажилося й не забивало базу. */
+  async function compressImage(file) {
+    let bmp = null;
+    if (window.createImageBitmap) { try { bmp = await createImageBitmap(file); } catch (e) { bmp = null; } }
+    if (!bmp) {
+      bmp = await new Promise((res, rej) => {
+        const url = URL.createObjectURL(file);
+        const im = new Image();
+        im.onload = () => { URL.revokeObjectURL(url); res(im); };
+        im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Не вдалося прочитати зображення.')); };
+        im.src = url;
+      });
+    }
+    const w0 = bmp.width || bmp.naturalWidth, h0 = bmp.height || bmp.naturalHeight;
+    if (!w0 || !h0) throw new Error('Не вдалося прочитати зображення.');
+    for (const [side, q] of [[1600, 0.78], [1280, 0.65], [1024, 0.5], [800, 0.45]]) {
+      const k = Math.min(1, side / Math.max(w0, h0));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w0 * k)); c.height = Math.max(1, Math.round(h0 * k));
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(bmp, 0, 0, c.width, c.height);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', q));
+      if (blob && blob.size <= 1.2 * 1024 * 1024) return blob;
+    }
+    throw new Error('Зображення завелике.');
+  }
+
+  const blobToB64 = (blob) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1] || '');
+    r.onerror = () => rej(new Error('Не вдалося прочитати файл.'));
+    r.readAsDataURL(blob);
+  });
+
+  async function addImages(s, files) {
+    const err = () => $('[data-role="err"]', s.el);
+    files = files.filter((f) => /^image\//.test(f.type) || /\.(jpe?g|png|webp|heic|heif)$/i.test(f.name)).slice(0, MAX_IMAGES - s.item.images.length);
+    if (!files.length) return;
+    s.uploading = (s.uploading || 0) + files.length;
+    rerender(s);
+    let msg = '';
+    for (const f of files) {
+      try {
+        const blob = await compressImage(f);
+        const r = await api('POST', '/api/images', { data: await blobToB64(blob) });
+        IMG[r.id] = URL.createObjectURL(blob);
+        s.item.images.push(r.id);
+      } catch (e) { msg = e.message || 'Не вдалося додати зображення.'; }
+      s.uploading--;
+      rerender(s);
+    }
+    if (msg && err()) err().textContent = msg;
+  }
+
   // ───────────── екрани ─────────────
 
   function viewToday() {
     let h = installHint();
     if (!S.lessons.length) {
-      h += card(`<div class="next-title">Розкладу ще немає</div><div class="muted">${isAdmin()
+      h += card(`<div class="next-title">Розкладу ще немає</div><div class="muted">${isMod()
         ? 'Відкрийте вкладку «Налаштування» і завантажте файл розкладу (.xls) — його одразу побачать усі студенти.'
-        : 'Адміністратор ще не завантажив розклад. Зайдіть пізніше або натисніть оновлення вгорі.'}</div>`);
+        : 'Адміністратор чи староста ще не завантажили розклад. Зайдіть пізніше або натисніть оновлення вгорі.'}</div>`);
       return h;
     }
     h += nextCard();
@@ -361,12 +635,12 @@
     const left = h.status === 'approved'
       ? `<button class="chk ${hwDone(h) ? 'on' : ''}" data-act="done" data-id="${esc(h.id)}" aria-label="Виконано">${ic(hwDone(h) ? 'checkc' : 'circle', 26)}</button>`
       : `<span class="chk st" style="color:${h.status === 'pending' ? 'var(--warn)' : 'var(--red)'}">${ic(h.status === 'pending' ? 'clock' : 'xc', 26)}</span>`;
-    return `<div class="hw">${left}
-      <button class="body" data-act="hwEdit" data-id="${esc(h.id)}">
+    return `<div class="hw">${left}<div class="hw-main">
+      <button class="body" data-act="hwOpen" data-id="${esc(h.id)}">
         <div class="subj" style="color:${subjColor(h.subjectKey)}">${esc(subjName(h.subjectKey))} ${hwBadge(h)}</div>
         <div class="txt ${hwDone(h) ? 'done' : ''}">${esc(h.text)}</div>
         <div class="muted small">До ${dayMonth(h.due)}</div>
-      </button></div>`;
+      </button>${attHTML(h)}</div></div>`;
   }
 
   function viewHomework() {
@@ -390,7 +664,85 @@
     if (overdue.length) h += sec('Прострочено', overdue);
     if (later.length) h += sec('Пізніше', later);
     if (done.length) h += sec('Виконано', done);
-    return h + `<button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
+    return h + `<div class="fab-gap"></div><button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
+  }
+
+  // ───────────── оцінки (адмін) ─────────────
+
+  const numGrade = (v) => (/^\d+([.,]\d+)?$/.test(String(v).trim()) ? parseFloat(String(v).replace(',', '.')) : null);
+  function gradeDate(d) {
+    if (!d || Number.isNaN(d.getTime())) return '';
+    return dayMonth(d) + (d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : '');
+  }
+
+  function viewGrades() {
+    const g = S.grades;
+    if (!g.items) {
+      return g.err
+        ? card(`<div class="err">${esc(g.err)}</div><button class="btn" data-act="gradesReload">Спробувати ще раз</button>`)
+        : '<div class="spin" style="margin:60px auto;width:28px;height:28px"></div>';
+    }
+    const groups = new Map();
+    for (const it of g.items) {
+      const k = it.subject || 'Без предмета';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(it);
+    }
+    const names = [...groups.keys()].sort((x, y) => x.localeCompare(y, 'uk'));
+    let h = '';
+    h += card(`
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <span>Усього оцінок</span>${badge(String(g.items.length), 'accent')}</div>
+      <div class="muted small">Перевірка нових оцінок — щодня о 20:00 за київським часом.${g.lastCheck ? ' Остання: ' + esc(dayMonth(g.lastCheck) + ', ' + hm(g.lastCheck)) + '.' : ''}</div>
+      <div class="${g.cls} small" ${g.msg ? '' : 'hidden'}>${esc(g.msg)}</div>
+      <button class="btn" data-act="gradesCheck" ${g.checking ? 'disabled' : ''}>${g.checking ? '<span class="spin"></span>' : 'Перевірити зараз'}</button>`);
+    if (!g.items.length) return h + '<div class="foot">У колекції grades поки немає жодної оцінки.</div>';
+    for (const name of names) {
+      const list = groups.get(name);
+      const nums = list.map((x) => numGrade(x.value)).filter((n) => n != null);
+      const avg = nums.length ? (nums.reduce((p, c) => p + c, 0) / nums.length).toFixed(2).replace(/\.?0+$/, '') : '';
+      h += `<div><div class="label" style="margin:0 0 6px 4px">${esc(name)} · ${list.length}${avg ? ' · сер. ' + esc(avg) : ''}</div><div class="list">${list.map((x) => {
+        const sub = [x.type, gradeDate(x.date), x.teacher].filter(Boolean).join(' · ');
+        const extra = !x.value && x.extra ? x.extra : '';
+        return `<div class="row"><span style="min-width:0">${esc(sub || (x.value ? 'Оцінка' : 'Запис'))}${extra ? `<span class="muted small" style="display:block">${esc(extra)}</span>` : ''}</span>${x.value ? badge(x.value, 'accent') : ''}</div>`;
+      }).join('')}</div></div>`;
+    }
+    return h;
+  }
+
+  async function loadGrades() {
+    S.grades.err = '';
+    try {
+      const r = await api('GET', '/api/admin/grades');
+      S.grades.items = r.items.map((x) => ({ ...x, date: x.date ? new Date(x.date) : null }));
+      S.grades.lastCheck = r.lastCheck ? new Date(r.lastCheck) : null;
+    } catch (e) { S.grades.err = e.message; }
+    render();
+  }
+
+  function viewNotify() {
+    const n = S.notify;
+    const opts = [`<option value="all" ${n.userId === 'all' ? 'selected' : ''}>Усім, хто увімкнув сповіщення</option>`]
+      .concat((n.users || []).map((u) => `<option value="${esc(u.id)}" ${n.userId === u.id ? 'selected' : ''}>${esc(u.fullName)} ${u.pushDevices ? '🔔' + u.pushDevices : '🔕'}</option>`));
+    return `
+      ${card(`
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Кому</span>
+          <select class="field" data-chg="notifyField" data-key="userId" ${n.users ? '' : 'disabled'}>${opts.join('')}</select></label>
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Заголовок (необов’язково)</span>
+          <input class="field" data-inp="notifyField" data-key="title" maxlength="60" placeholder="Повідомлення від адміністратора" value="${esc(n.title)}"></label>
+        <label style="display:flex;flex-direction:column;gap:6px"><span class="label">Текст</span>
+          <textarea class="field" data-inp="notifyField" data-key="body" maxlength="300" rows="4" placeholder="Наприклад: завтра перша пара скасована">${esc(n.body)}</textarea></label>
+        <div class="${n.cls} small" ${n.msg ? '' : 'hidden'}>${esc(n.msg)}</div>
+        <button class="btn" data-act="notifySend" ${n.sending ? 'disabled' : ''}>${n.sending ? '<span class="spin"></span>' : 'Надіслати'}</button>`)}
+      <div class="foot">Сповіщення прийде на всі пристрої обраної людини, де вона ввімкнула сповіщення (🔔 і число — кількість таких пристроїв, 🔕 — сповіщення не ввімкнені). Налаштування нагадувань на нього не впливають.</div>`;
+  }
+
+  async function loadNotifyUsers() {
+    try {
+      S.notify.users = await api('GET', '/api/admin/users');
+      if (S.notify.userId !== 'all' && !S.notify.users.some((u) => u.id === S.notify.userId)) S.notify.userId = 'all';
+    } catch (e) { S.notify.msg = e.message; S.notify.cls = 'err'; }
+    render();
   }
 
   function pushStatusText() {
@@ -406,14 +758,14 @@
     let h = '';
 
     h += `<div><div class="label" style="margin:0 0 6px 4px">Акаунт</div><div class="list">
-      <div class="row"><span>${esc(S.user.fullName)}</span>${isAdmin() ? badge('АДМІН', 'accent') : ''}</div>
+      <div class="row"><span>${esc(S.user.fullName)}</span>${roleBadge(S.user)}</div>
       ${S.syncError ? `<div class="err">${esc(S.syncError)}</div>` : ''}
       <button class="row" data-act="sync"><span>Оновити дані</span></button>
       <button class="row" data-act="share"><span>Поділитися посиланням на щоденник</span></button>
       <button class="row" data-act="logout"><span style="color:var(--red)">Вийти</span></button>
-    </div>${!isAdmin() ? '<div class="foot">Розклад, посилання на пари й імена викладачів налаштовує адміністратор.</div>' : ''}</div>`;
+    </div>${!isMod() ? '<div class="foot">Посилання на пари й імена викладачів налаштовують адміністратор і староста.</div>' : ''}</div>`;
 
-    if (isAdmin()) {
+    if (isMod()) {
       h += `<div><div class="label" style="margin:0 0 6px 4px">Розклад</div><div class="list">
         <div>${S.lessons.length
           ? `${S.scheduleTitle ? `<div>${esc(S.scheduleTitle)}</div>` : ''}<div class="muted small">Пар у розкладі: ${S.lessons.length}${scheduleRange()}</div>`
@@ -428,7 +780,7 @@
         <button class="row" data-act="moderation"><span>Домашнє на підтвердження</span>${q ? badge(String(q), 'warn') : ''}</button>
         <button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
         <button class="row" data-act="teachers"><span>Викладачі</span></button>
-        <button class="row" data-act="users"><span>Учасники й пристрої</span></button>
+        ${isAdmin() ? `<button class="row" data-act="users"><span>Учасники, ролі й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>` : ''}
       </div></div>`;
     }
 
@@ -463,19 +815,27 @@
     { id: 'today', title: 'Сьогодні', icon: 'bolt' },
     { id: 'schedule', title: 'Розклад', icon: 'calendar' },
     { id: 'homework', title: 'Домашня', icon: 'book' },
+    { id: 'grades', title: 'Оцінки', icon: 'star', admin: true },
+    { id: 'notify', title: 'Сповіщення', icon: 'bell', admin: true },
     { id: 'settings', title: 'Налаштування', icon: 'gear' },
   ];
+  const visibleTabs = () => TABS.filter((t) => !t.admin || isAdmin());
 
   function render() {
     const app = $('#app');
     if (!S.user) {
+      removePushAsk();
       if (S.token) { app.innerHTML = '<div class="login"><div class="spin" style="margin:80px auto;width:28px;height:28px"></div></div>'; return; }
       if (!$('#loginForm')) app.innerHTML = viewLogin();
       return;
     }
-    const y = window.scrollY;
-    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, settings: viewSettings };
-    const cur = TABS.find((t) => t.id === S.tab) || TABS[0];
+    const a = document.activeElement;
+    if (S.tab === 'notify' && a && a.closest && a.closest('main') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не збиваємо введення
+    const oldMain = $('main.content');
+    const y = oldMain ? oldMain.scrollTop : 0;
+    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, grades: viewGrades, notify: viewNotify, settings: viewSettings };
+    const tabs = visibleTabs();
+    const cur = tabs.find((t) => t.id === S.tab) || tabs[0];
     const q = moderationQueue().length;
     app.innerHTML = `
       <header class="topbar"><h1>${cur.title}</h1><div class="right">
@@ -483,10 +843,11 @@
         <button class="icon-btn ${S.syncing ? 'refreshing' : ''}" data-act="sync" aria-label="Оновити">${ic('refresh', 20)}</button>
       </div></header>
       <main class="content">${views[cur.id]()}</main>
-      <nav class="tabbar"><div class="tabbar-in">${TABS.map((t) => `
+      <nav class="tabbar"><div class="tabbar-in">${tabs.map((t) => `
         <button class="tab ${t.id === S.tab ? 'active' : ''}" data-act="tab" data-tab="${t.id}">${ic(t.icon, 22)}<span>${t.title}</span>
-          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}</button>`).join('')}</div></nav>`;
-    window.scrollTo(0, y);
+          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}${t.id === 'settings' && isAdmin() && S.deviceRequests ? `<span class="dot">${S.deviceRequests}</span>` : ''}</button>`).join('')}</div></nav>`;
+    const newMain = $('main.content');
+    if (newMain) newMain.scrollTop = y;
     refreshSheets();
   }
 
@@ -502,7 +863,7 @@
             <span class="label">Пароль адміністратора</span>
             <input class="field" id="adminPass" type="password" autocomplete="current-password" placeholder="Потрібен для нового пристрою">
           </div>
-          <div class="muted small">Під цим ПІБ вас бачитиме адміністратор. Його закріплено за цим пристроєм.</div>
+          <div class="muted small">Під цим ПІБ вас бачитиме адміністратор. На новому пристрої він має підтвердити вхід — запит піде йому автоматично.</div>
         </div>
         <div id="loginErr" class="err" style="margin:12px 0;text-align:center">${esc(loginNotice)}</div>
         <button class="btn" id="loginBtn" type="submit">Увійти</button>
@@ -584,7 +945,9 @@
     if (!l) return '<div class="muted">Пару не знайдено</div>';
     const url = joinURL(l.subjectKey);
     const color = subjColor(l.subjectKey);
-    const items = listedHomework().filter((h) => h.lessonID === l.id);
+    const lh = lessonHomework(l);
+    const hwItem = (h) => `<div class="hw-item"><div class="txt" style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
+          <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`;
     return `
       ${card(`
         <div class="hstack"><div class="avatar" style="background:${color}38;color:${color}">${esc(l.subjectKey.charAt(0).toUpperCase())}</div>
@@ -596,42 +959,77 @@
         <div class="info"><span>Де</span><span>${esc(placeTitle(l))}</span></div>
         ${l.teacher ? `<div class="info"><span>Викладач</span><span>${esc(teacherName(l.teacher))}</span></div>` : ''}`)}
       ${url ? `<a class="btn green big" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${ic('video', 20)} Приєднатися до пари</a>` : ''}
-      ${isAdmin() ? card(`
+      ${isMod() ? card(`
         <span class="label">Посилання на пару</span>
         <input class="field" name="link" type="url" inputmode="url" autocapitalize="none" autocorrect="off" placeholder="https://zoom.us/j/… або Meet / Teams" value="${esc((S.subjects[l.subjectKey] && S.subjects[l.subjectKey].link) || '')}">
         <div class="muted small">Посилання діє для всього предмета й одразу з’являється в усіх студентів.</div>
         <div class="muted small" data-role="msg"></div>
         <button class="btn deep" data-act="saveLink" data-key="${esc(l.subjectKey)}">Зберегти посилання</button>`) : ''}
       ${card(`
-        <span class="label">Домашнє після цієї пари</span>
-        ${items.length ? items.map((h) => `<div><div class="txt" style="white-space:pre-wrap">${esc(h.text)}</div>
-          <div class="muted small">До ${dayMonth(h.due)} ${hwBadge(h)}</div></div>`).join('') : '<div class="muted">Нічого не записано</div>'}
-        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isAdmin() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}`;
+        <span class="label">Домашнє на пару · ${dayMonth(l.start)}</span>
+        ${lh.given.length ? lh.given.map(hwItem).join('') : '<div class="muted">На цій парі нічого не записано</div>'}
+        <button class="btn" data-act="hwNew" data-lesson="${esc(l.id)}">${isMod() ? 'Записати домашнє' : 'Запропонувати домашнє'}</button>`)}
+      ${lh.due.length ? card(`
+        <span class="label">Потрібно здати на цю пару</span>
+        ${lh.due.map(hwItem).join('')}`) : ''}`;
+  }
+
+  function openHomeworkView(h0) {
+    const cur = () => S.homework.find((x) => x.id === h0.id) || h0;
+    return openSheet({
+      viewId: h0.id,
+      title: 'Домашнє',
+      right: () => canEdit(cur()) ? '<button class="link" data-act="hwEditFromView">Редагувати</button>' : '',
+      render: () => {
+        const h = cur();
+        const links = (h.links || []).map((u) => `<a class="chip-link" href="${esc(u)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(shortUrl(u))}</a>`).join('');
+        const imgs = (h.images || []).map((id) => `<button class="full-btn" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id, 'full')}</button>`).join('');
+        return card(`<div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))} ${hwBadge(h)}</div>
+          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>
+          <div class="muted small">До ${dayMonth(h.due)}${h.authorName ? ' · додав(ла): ' + esc(h.authorName) : ''}</div>`)
+          + (links ? card(`<span class="label">Посилання</span><div class="att">${links}</div>`) : '')
+          + (imgs ? card(`<span class="label">Зображення</span>${imgs}`) : '');
+      },
+    });
   }
 
   function openHomeworkForm(item) {
+    item.links = (item.links || []).slice();
+    item.images = (item.images || []).slice();
     const editing = !!item.id && S.homework.some((h) => h.id === item.id);
     const keys = subjectKeys();
     if (item.subjectKey && !keys.includes(item.subjectKey)) keys.push(item.subjectKey);
     const cur = editing ? S.homework.find((h) => h.id === item.id) : null;
-    return openSheet({
+    const sheet = {
       auto: false,
       closeLabel: 'Скасувати',
-      item, editing,
+      item, editing, uploading: 0,
       title: editing ? 'Домашнє' : 'Нове домашнє',
-      right: () => `<button class="link" data-act="hwSave">${editing ? 'Зберегти' : isAdmin() ? 'Додати' : 'Надіслати'}</button>`,
+      right: () => `<button class="link" data-act="hwSave">${editing ? 'Зберегти' : isMod() ? 'Додати' : 'Надіслати'}</button>`,
       render: () => `<div class="form">
-        <label><span class="label">Предмет</span><select class="field" name="subject">
+        <label><span class="label">Предмет</span><select class="field" name="subject" data-chg="hwDue">
           ${keys.map((k) => `<option value="${esc(k)}" ${k === item.subjectKey ? 'selected' : ''}>${esc(subjName(k))}</option>`).join('')}</select></label>
         <label><span class="label">Що задали</span><textarea class="field" name="text" rows="5" placeholder="Що задали">${esc(item.text)}</textarea></label>
-        <label><span class="label">Здати до</span><input class="field" type="date" name="due" value="${toInput(item.due)}"></label>
-        ${!isAdmin() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор.</div>' : ''}
-        ${editing && cur && cur.status === 'rejected' ? '<div class="muted small">Адміністратор відхилив це завдання. Виправте його й надішліть знову.</div>' : ''}
+        <label><span class="label">Здати до</span>
+          <select class="field" name="dueMode" data-chg="hwDue">${dueModeOptions(item.subjectKey, dueBase(item), item.dueMode || 'date')}</select></label>
+        <input class="field" type="date" name="due" value="${toInput(item.due)}" ${(item.dueMode || 'date') !== 'date' ? 'readonly tabindex="-1" style="pointer-events:none;opacity:.7"' : ''}>
+        <div class="muted small" data-role="dueHint">${esc(dueHint(item.subjectKey, dueBase(item), item.dueMode || 'date'))}</div>
+        <div class="att-edit">
+          <span class="label">Посилання</span>
+          ${item.links.map((u, i) => `<div class="att-row"><a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(u))}</a><button type="button" class="link" data-act="linkDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}
+          ${item.links.length < MAX_LINKS ? `<div class="att-add"><input class="field" name="linkInput" type="url" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Вставте посилання"><button type="button" class="btn deep" data-act="linkAdd">Додати</button></div>` : ''}
+          <span class="label">Зображення</span>
+          ${item.images.length || sheet.uploading ? `<div class="thumbs">${item.images.map((id, i) => `<div class="thumb"><button type="button" class="thumb-btn" data-act="imgOpen" data-id="${esc(id)}" aria-label="Відкрити зображення">${imgTag(id)}</button><button type="button" class="x" data-act="imgDel" data-i="${i}" aria-label="Прибрати">✕</button></div>`).join('')}${sheet.uploading ? '<div class="thumb"><span class="spin"></span></div>' : ''}</div>` : ''}
+          ${item.images.length < MAX_IMAGES ? `<label class="btn deep att-pick">Додати зображення<input type="file" accept="image/*" multiple data-chg="hwImages" hidden></label>` : ''}
+        </div>
+        ${!isMod() && !editing ? '<div class="muted small">Завдання з’явиться в усіх після того, як його підтвердить адміністратор, староста чи заступник.</div>' : ''}
+        ${editing && cur && cur.status === 'rejected' ? '<div class="muted small">Це завдання відхилили. Виправте його й надішліть знову.</div>' : ''}
         <div class="err" data-role="err"></div>
         ${!editing && item.lessonID ? `<button class="btn deep" data-act="hwNone" data-lesson="${esc(item.lessonID)}">Нічого не задали</button>` : ''}
         ${editing && canEdit(cur || item) ? '<button class="btn red" data-act="hwDelete">Видалити</button>' : ''}
       </div>`,
-    });
+    };
+    return openSheet(sheet);
   }
 
   function openModeration() {
@@ -642,7 +1040,7 @@
         if (!q.length) return card('<span class="muted">Немає завдань на підтвердження</span>');
         return q.map((h) => card(`
           <div class="subj" style="color:${subjColor(h.subjectKey)};font-size:12px;font-weight:700">${esc(subjName(h.subjectKey))}</div>
-          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>
+          <div style="white-space:pre-wrap;word-break:break-word">${esc(h.text)}</div>${attHTML(h)}
           <div class="muted small">До ${dayMonth(h.due)} · додав(ла): ${esc(h.authorName)}</div>
           <div class="btn-row"><button class="btn green" data-act="approve" data-id="${esc(h.id)}">Підтвердити</button>
             <button class="btn red" data-act="reject" data-id="${esc(h.id)}">Відхилити</button></div>
@@ -685,17 +1083,29 @@
     });
   }
 
+  const fWhen = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? `${dayMonth(d)}, ${hm(d)}` : ''; };
+
   function openUsers() {
-    const s = { auto: false, title: 'Учасники', users: null, err: '' };
+    const s = { auto: false, title: 'Учасники й пристрої', users: null, err: '' };
     s.render = () => {
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
-      return '<div class="muted small">Якщо людина втратила телефон чи перевстановила застосунок — натисніть «Відв’язати пристрій», і вона зможе увійти знову.</div>' +
-        s.users.map((u) => card(`
-          <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${u.isAdmin ? badge('АДМІН', 'accent') : ''}</div>
-          <div class="muted small">Пристроїв: ${u.devices}</div>
-          <div class="btn-row"><button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати пристрій</button>
-            ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити</button>` : ''}</div>`)).join('');
+      const list = [...s.users].sort((a, b) => (b.pending.length > 0) - (a.pending.length > 0) || a.fullName.localeCompare(b.fullName, 'uk'));
+      return '<div class="muted small">Староста й заступник можуть підтверджувати домашнє та завантажувати розклад. Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
+        list.map((u) => card(`
+          <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${roleBadge(u)}</div>
+          ${u.isAdmin ? '' : `<label><span class="label">Роль</span><select class="field" data-chg="userRole" data-user="${esc(u.id)}"><option value="" ${!u.role ? 'selected' : ''}>Студент</option><option value="starosta" ${u.role === 'starosta' ? 'selected' : ''}>Староста</option><option value="deputy" ${u.role === 'deputy' ? 'selected' : ''}>Заступник старости</option></select></label>`}
+          ${u.pending.length ? `<div class="label" style="color:var(--warn)">Запити на новий пристрій</div>` + u.pending.map((p) => `
+            <div class="dev"><div class="dn">${esc(p.label)}<div class="muted small">${esc(fWhen(p.requestedAt))}</div></div>
+              <div style="display:flex;gap:6px"><button class="btn green small" data-act="devApprove" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Підтвердити</button>
+              <button class="btn red small" data-act="devReject" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Ні</button></div></div>`).join('') : ''}
+          <div class="label">Пристрої (${u.devices})</div>
+          ${u.deviceList.length ? u.deviceList.map((d) => `
+            <div class="dev"><div class="dn">${esc(d.label)}${d.addedAt ? `<div class="muted small">додано ${esc(fWhen(d.addedAt))}</div>` : ''}</div>
+              <button class="btn deep small" data-act="devRemove" data-user="${esc(u.id)}" data-key="${esc(d.key)}" data-name="${esc(u.fullName)}">Видалити</button></div>`).join('')
+            : '<div class="muted small">Немає — перший пристрій, з якого людина увійде, стане основним.</div>'}
+          <div class="btn-row">${u.devices > 1 ? `<button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати всі</button>` : ''}
+            ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити людину</button>` : ''}</div>`, u.pending.length ? 'pending-box' : '')).join('');
     };
     s.reload = async () => {
       try { s.users = await api('GET', '/api/admin/users'); s.err = ''; } catch (e) { s.err = e.message; }
@@ -733,12 +1143,29 @@
     if (S.user && S.tab === 'settings') render();
   }
 
-  async function subscribePush() {
+  /** Чи підписку створено з поточним ключем сервера. Після зміни ключів стара підписка отримує від Apple 403. */
+  function sameKey(sub, publicKey) {
+    try {
+      const k = sub.options && sub.options.applicationServerKey;
+      if (!k) return true; // перевірити неможливо
+      const a = new Uint8Array(k);
+      const b = b64ToU8(publicKey);
+      return a.length === b.length && a.every((v, i) => v === b[i]);
+    } catch (e) { return true; }
+  }
+
+  async function subscribePush(force) {
     const reg = await navigator.serviceWorker.ready;
     const cfg = await api('GET', '/api/push/config');
     let sub = await reg.pushManager.getSubscription();
+    if (sub && (force || !sameKey(sub, cfg.publicKey))) {
+      // Стара/зламана підписка — прибираємо й створюємо нову з актуальним ключем.
+      await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(() => {});
+      await sub.unsubscribe().catch(() => {});
+      sub = null;
+    }
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToU8(cfg.publicKey) });
-    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), settings: pushSettings() });
+    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), settings: pushSettings(), key: cfg.publicKey });
     return sub;
   }
 
@@ -779,6 +1206,45 @@
       }
     } catch (e) { /* ignore */ }
     refreshPushState();
+  }
+
+  // ───────────── запит дозволу на сповіщення при першому заході ─────────────
+  // Системний запит браузер дозволяє показати лише після натискання користувача,
+  // тому спершу показуємо власне вікно з кнопкою «Дозволити».
+
+  // Питаємо при кожному заході (завантаженні сторінки або поверненні в застосунок після 30+ хв),
+  // доки сповіщення не ввімкнені. «Не зараз» ховає вікно лише до наступного заходу.
+  let askDismissed = false;
+  let hiddenAt = 0;
+
+  function removePushAsk() { const el = document.getElementById('pushAsk'); if (el) el.remove(); }
+
+  async function maybeAskPush() {
+    if (!S.user || !S.token) { removePushAsk(); return; }
+    if (askDismissed || document.getElementById('pushAsk') || !pushSupported()) return;
+    const perm = Notification.permission;
+    let subscribed = false;
+    try { subscribed = !!(await getSub()); } catch (e) { /* ignore */ }
+    if (perm === 'granted' && subscribed) return; // усе ввімкнено
+    if (!S.user || document.getElementById('pushAsk')) return;
+    const denied = perm === 'denied';
+    const howTo = isIOS
+      ? 'Відкрийте «Налаштування» iPhone → «Сповіщення» → «Щоденник» і ввімкніть «Дозволити сповіщення». Потім поверніться сюди.'
+      : 'Натисніть значок замка (або налаштувань) ліворуч від адреси сайту → «Сповіщення» → «Дозволити», а потім оновіть сторінку.';
+    const box = document.createElement('div');
+    box.id = 'pushAsk';
+    box.className = 'push-ask';
+    box.innerHTML = `
+      <div class="push-ask-card" role="dialog" aria-modal="true" aria-labelledby="pushAskTitle">
+        <div class="push-ask-ico">${denied ? '🔕' : '🔔'}</div>
+        <h2 id="pushAskTitle">${denied ? 'Сповіщення вимкнені' : 'Увімкнути сповіщення?'}</h2>
+        <p class="muted">${denied
+          ? 'Без них ви не отримаєте нагадування про пари й нове домашнє. ' + howTo
+          : 'Нагадаємо про пару за кілька хвилин до початку, а після неї — спитаємо, що задали. Працює й коли щоденник закрито.'}</p>
+        ${denied ? '' : '<button class="btn" data-act="pushAllow">Дозволити</button>'}
+        <button class="link" data-act="pushLater">${denied ? 'Зрозуміло' : 'Не зараз'}</button>
+      </div>`;
+    document.body.appendChild(box);
   }
 
   let settingsTimer = null;
@@ -887,14 +1353,26 @@
   }
 
   const ACT = {
-    tab(el) { S.tab = el.dataset.tab; window.scrollTo(0, 0); render(); },
-    sync() { sync(); },
+    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); if (S.tab === 'grades') loadGrades(); },
+    gradesReload() { loadGrades(); },
+    async gradesCheck() {
+      const g = S.grades;
+      g.checking = true; g.msg = ''; render();
+      try {
+        const r = await api('POST', '/api/admin/grades/check');
+        g.msg = r.fresh ? `Нових оцінок: ${r.fresh}. Сповіщень доставлено: ${r.notified}.` : 'Нових оцінок немає.'; g.cls = 'ok';
+        await loadGrades();
+      } catch (e) { g.msg = e.message; g.cls = 'err'; }
+      g.checking = false;
+      render();
+    },
+    sync() { sync(); if (S.tab === 'grades' && isAdmin()) loadGrades(); },
     lesson(el) { openLesson(el.dataset.id); },
     day(el) { S.day = sod(new Date(+el.dataset.ts)); render(); },
     shift(el) { S.day = addDays(S.day, +el.dataset.d); render(); },
     goToday() { S.day = sod(new Date()); render(); },
     done(el) { toggleDone(el.dataset.id); render(); },
-    answered(el) { markAnswered(el.dataset.lesson); render(); },
+    answered(el) { answerNone(el.dataset.lesson); },
     hintOff() { LS.set('hintOff', true); render(); },
     moderation() { openModeration(); },
     subjects() { openSubjects(); },
@@ -908,9 +1386,42 @@
     },
     hwEdit(el) {
       const h = S.homework.find((x) => x.id === el.dataset.id);
-      if (h && canEdit(h)) openHomeworkForm(Object.assign({}, h));
+      if (!h) return;
+      if (canEdit(h)) openHomeworkForm(Object.assign({}, h)); else openHomeworkView(h);
     },
-    hwNone(el) { markAnswered(el.dataset.lesson); closeSheet(); render(); },
+    hwOpen(el) {
+      const h = S.homework.find((x) => x.id === el.dataset.id);
+      if (h) openHomeworkView(h);
+    },
+    hwEditFromView(el) {
+      const s = sheetOf(el); if (!s) return;
+      const id = s.viewId;
+      const h = S.homework.find((x) => x.id === id);
+      if (!h || !canEdit(h)) return;
+      // closeSheet() працює через history.back() (асинхронно) — форму відкриваємо вже після закриття перегляду.
+      const reopen = () => { window.removeEventListener('popstate', reopen); setTimeout(() => openHomeworkForm(Object.assign({}, h)), 0); };
+      window.addEventListener('popstate', reopen);
+      closeSheet();
+    },
+    linkAdd(el) {
+      const s = sheetOf(el); if (!s) return;
+      const inp = $('[name=linkInput]', s.el);
+      const err = $('[data-role="err"]', s.el);
+      const v = normLink(inp.value);
+      if (!inp.value.trim()) return;
+      if (v === null) { err.textContent = 'Некоректне посилання.'; return; }
+      if (!s.item.links.includes(v)) s.item.links.push(v);
+      inp.value = '';
+      rerender(s);
+      $('[data-role="err"]', s.el).textContent = '';
+    },
+    linkDel(el) { const s = sheetOf(el); if (!s) return; s.item.links.splice(+el.dataset.i, 1); rerender(s); },
+    imgDel(el) { const s = sheetOf(el); if (!s) return; s.item.images.splice(+el.dataset.i, 1); rerender(s); },
+    imgOpen(el) {
+      const id = el.dataset.id;
+      openSheet({ auto: false, title: 'Зображення', render: () => `<img class="full" ${IMG[id] ? `src="${IMG[id]}"` : `data-img="${esc(id)}"`} alt="">` });
+    },
+    hwNone(el) { closeSheet(); answerNone(el.dataset.lesson); },
 
     async hwSave(el) {
       const s = sheetOf(el);
@@ -923,14 +1434,22 @@
       if (!subjectKey) { err.textContent = 'Оберіть предмет.'; return; }
       if (!text) { err.textContent = 'Опишіть, що задали.'; return; }
       if (!due) { err.textContent = 'Вкажіть дату.'; return; }
+      const pend = $('[name=linkInput]', s.el);
+      if (pend && pend.value.trim()) {
+        const u = normLink(pend.value);
+        if (u === null) { err.textContent = 'Некоректне посилання (або очистіть поле).'; return; }
+        if (!s.item.links.includes(u)) s.item.links.push(u);
+      }
+      if (s.item.links.length > MAX_LINKS) { err.textContent = `Не більше ${MAX_LINKS} посилань.`; return; }
+      if (s.uploading > 0) { err.textContent = 'Зачекайте — зображення ще завантажується.'; return; }
       await withBusy(el, async () => {
         try {
-          const body = { subjectKey, lessonID: s.item.lessonID || null, text, due: due.toISOString() };
+          const body = { subjectKey, lessonID: s.item.lessonID || null, text, due: due.toISOString(), links: s.item.links, images: s.item.images };
           if (s.editing) await api('PATCH', '/api/homework/' + encodeURIComponent(s.item.id), body);
           else await api('POST', '/api/homework', body);
           if (s.item.lessonID) markAnswered(s.item.lessonID);
           closeSheet();
-          toast(!s.editing && !isAdmin() ? 'Надіслано на підтвердження адміністратору' : 'Збережено');
+          toast(!s.editing && !isMod() ? 'Надіслано на підтвердження' : 'Збережено');
           await sync();
         } catch (e) { err.textContent = e.message; }
       });
@@ -984,10 +1503,16 @@
       });
     },
 
+    async devApprove(el) { await deviceAction(el, 'POST', 'approve', 'Пристрій підтверджено — вхід відбудеться автоматично'); },
+    async devReject(el) { await deviceAction(el, 'POST', 'reject', 'Запит відхилено'); },
+    async devRemove(el) {
+      if (!confirm(`Видалити цей пристрій у «${el.dataset.name}»? З нього треба буде входити знову.`)) return;
+      await deviceAction(el, 'DELETE', '', 'Пристрій видалено');
+    },
     async resetDevices(el) {
       const s = sheetOf(el);
-      if (!confirm('Відв’язати пристрій цього користувача?')) return;
-      try { await api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.id)}/reset-devices`); toast('Пристрій відв’язано'); } catch (e) { toast(e.message); }
+      if (!confirm('Відв’язати ВСІ пристрої цього користувача? Перший, хто увійде під його ПІБ, стане новим основним.')) return;
+      try { await api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.id)}/reset-devices`); toast('Усі пристрої відв’язано'); } catch (e) { toast(e.message); }
       if (s && s.reload) s.reload();
     },
     async deleteUser(el) {
@@ -997,21 +1522,48 @@
       if (s && s.reload) s.reload();
     },
 
+    async notifySend(el) {
+      const n = S.notify;
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (!n.body.trim()) { n.msg = 'Введіть текст сповіщення.'; n.cls = 'err'; render(); return; }
+      const target = n.userId === 'all' ? 'усім' : (n.users.find((u) => u.id === n.userId) || {}).fullName;
+      if (!confirm(`Надіслати сповіщення: ${target}?`)) return;
+      n.sending = true; n.msg = ''; render();
+      try {
+        const r = await api('POST', '/api/admin/notify', { userId: n.userId, title: n.title.trim(), body: n.body.trim() });
+        n.msg = `Надіслано на пристроїв: ${r.sent}`; n.cls = 'ok'; n.body = '';
+      } catch (e) { n.msg = e.message; n.cls = 'err'; }
+      n.sending = false;
+      render();
+    },
     lead(el) {
       S.settings.leadMinutes = Math.min(15, Math.max(1, S.settings.leadMinutes + +el.dataset.d));
       saveSettings(); pushSettingsChanged(); render();
     },
     pushOn() { enablePush(); },
+    async pushAllow() { removePushAsk(); askDismissed = true; await enablePush(); },
+    pushLater() { askDismissed = true; removePushAsk(); },
     pushOff() { disablePush(); },
     async pushTest(el) {
       await withBusy(el, async () => {
-        try {
+        const run = async () => {
           const sub = await getSub();
           if (!sub) throw new Error('Спершу увімкніть сповіщення.');
           await api('PUT', '/api/push/settings', { endpoint: sub.endpoint, settings: pushSettings() });
           await api('POST', '/api/push/test', { endpoint: sub.endpoint });
+        };
+        try {
+          try {
+            await run();
+          } catch (e) {
+            // Підписки немає на сервері або її відхилив push-сервіс (403) — створюємо заново й пробуємо ще раз.
+            if (e.status === 404 || e.code === 'push_rejected') { await subscribePush(true); await run(); } else throw e;
+          }
           toast('Тест надіслано — сповіщення має прийти за кілька секунд.');
-        } catch (e) { toast(e.message); }
+        } catch (e) {
+          toast(e.code === 'push_rejected' ? e.message + ' Перевірте VAPID_SUBJECT на сервері (має бути реальна пошта).' : e.message);
+        }
+        refreshPushState();
       });
     },
     async share() {
@@ -1029,6 +1581,19 @@
     },
     logout() { if (confirm('Вийти з акаунта? Дані на цьому пристрої буде видалено, на сервері вони лишаться.')) signOut(); },
   };
+
+  async function deviceAction(el, method, action, okText) {
+    const s = sheetOf(el);
+    await withBusy(el, async () => {
+      try {
+        const path = `/api/admin/users/${encodeURIComponent(el.dataset.user)}/devices/${encodeURIComponent(el.dataset.key)}${action ? '/' + action : ''}`;
+        await api(method, path);
+        toast(okText);
+      } catch (e) { toast(e.message); }
+    });
+    if (s && s.reload) await s.reload();
+    sync();
+  }
 
   async function moderate(el, what) {
     await withBusy(el, async () => {
@@ -1054,11 +1619,31 @@
       saveSettings();
       pushSettingsChanged();
       if (el.dataset.key === 'notificationsEnabled' && el.checked && S.push.supported && !S.push.subscribed) enablePush();
+    } else if (el.dataset.chg === 'hwDue') {
+      const s = sheetOf(el);
+      if (s && s.item) hwRefreshDue(s);
+    } else if (el.dataset.chg === 'userRole') {
+      const s = sheetOf(el);
+      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/role`, { role: el.value })
+        .then(() => { toast('Роль змінено'); if (s && s.reload) s.reload(); })
+        .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
+    } else if (el.dataset.chg === 'notifyField') {
+      S.notify[el.dataset.key] = el.value;
+    } else if (el.dataset.chg === 'hwImages' && el.files && el.files.length) {
+      const s = sheetOf(el);
+      const files = [...el.files];
+      el.value = '';
+      if (s) addImages(s, files);
     } else if (el.dataset.chg === 'schedFile' && el.files && el.files[0]) {
       const f = el.files[0];
       el.value = '';
       importSchedule(f);
     }
+  });
+
+  document.addEventListener('input', (e) => {
+    const el = e.target.closest('[data-inp]');
+    if (el && el.dataset.inp === 'notifyField') S.notify[el.dataset.key] = el.value;
   });
 
   document.addEventListener('submit', async (e) => {
@@ -1073,6 +1658,7 @@
     btn.innerHTML = '<span class="spin"></span>';
     try {
       loginNotice = '';
+      stopPending();
       await login(name, $('#adminPass') ? $('#adminPass').value : '');
     } catch (ex) {
       if (!S.user) {
@@ -1081,7 +1667,12 @@
           const w = $('#passWrap');
           if (w) { w.hidden = false; w.style.display = 'flex'; }
         }
-        err.textContent = ex.message;
+        if (ex.code === 'device_pending') {
+          setLoginMsg(ex.message, 'wait');
+          startPending(name);
+        } else {
+          setLoginMsg(ex.message, 'err');
+        }
         btn.disabled = false;
         btn.textContent = 'Увійти';
       }
@@ -1104,9 +1695,10 @@
 
     if (p.has('lesson')) openLesson(p.get('lesson'), { join: p.get('join') === '1' });
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
-    else if (p.has('answered')) { markAnswered(p.get('answered')); toast('Добре, відмітили'); render(); }
-    else if (p.get('tab') === 'moderation') { if (isAdmin()) { S.tab = 'homework'; render(); openModeration(); } }
-    else if (p.get('tab')) { S.tab = TABS.some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
+    else if (p.has('answered')) { answerNone(p.get('answered')); toast('Добре, відмітили'); }
+    else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
+    else if (p.get('tab') === 'moderation') { if (isMod()) { S.tab = 'homework'; render(); openModeration(); } }
+    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); if (S.tab === 'grades') loadGrades(); }
   }
 
   // ───────────── запуск ─────────────
@@ -1116,13 +1708,17 @@
   function boot() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
-      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'route') routeFromUrl(e.data.url); });
+      navigator.serviceWorker.addEventListener('message', (e) => {
+        if (!e.data) return;
+        if (e.data.type === 'route') routeFromUrl(e.data.url);
+        else if (e.data.type === 'sync' && S.user) sync();
+      });
     }
     if (location.search) S.pendingRoute = location.search;
 
     if (S.token) {
       const cached = LS.get('cache', null);
-      if (cached) { try { applySync(cached); } catch (e) { /* зіпсований кеш */ } }
+      if (cached) { try { applySync(cached, true); } catch (e) { /* зіпсований кеш */ } }
     }
     render();
     refreshPushState();
@@ -1133,7 +1729,11 @@
       if (S.tab === 'today' || S.tab === 'schedule') render();
     }, 30000);
     setInterval(() => { if (S.user && !document.hidden) sync(); }, 120000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden && S.user) { sync(); refreshPushState(); } });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 30 * 60 * 1000) askDismissed = false; // новий «захід»
+      if (S.user) { sync(); refreshPushState(); }
+    });
   }
 
   boot();
