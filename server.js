@@ -134,7 +134,7 @@ async function initDb() {
   answers = db.collection('answers'); // кому з користувачів уже відповів на «Що задали?» (діє на всіх його пристроях)
   hwImages = db.collection('hwImages'); // зображення, прикріплені до домашнього
   noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
-  grades = db.collection('grades'); // оцінки (заповнюються поза цим сервером; тут лише читаємо)
+  grades = client.db(process.env.GRADES_DB || DB_NAME).collection('grades'); // оцінки (заповнюються поза цим сервером; тут лише читаємо)
   gradesSeen = db.collection('gradesSeen'); // id оцінок, про які адміністратора вже сповіщено
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
