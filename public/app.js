@@ -40,6 +40,7 @@
     deviceRequests: 0,
     noHw: new Set(),
     schedMsg: { text: '', cls: 'muted' },
+    grades: { items: null, lastCheck: null, err: '', checking: false, msg: '', cls: 'muted' },
     notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
 
@@ -86,6 +87,7 @@
     refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/>',
     left: '<path d="M15 18l-6-6 6-6"/>',
     right: '<path d="M9 18l6-6-6-6"/>',
+    star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
   };
   const ic = (name, size = 22) =>
     `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -665,6 +667,60 @@
     return h + `<div class="fab-gap"></div><button class="fab" data-act="hwNew" aria-label="Додати домашнє">${ic('plus', 26)}</button>`;
   }
 
+  // ───────────── оцінки (адмін) ─────────────
+
+  const numGrade = (v) => (/^\d+([.,]\d+)?$/.test(String(v).trim()) ? parseFloat(String(v).replace(',', '.')) : null);
+  function gradeDate(d) {
+    if (!d || Number.isNaN(d.getTime())) return '';
+    return dayMonth(d) + (d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : '');
+  }
+
+  function viewGrades() {
+    const g = S.grades;
+    if (!g.items) {
+      return g.err
+        ? card(`<div class="err">${esc(g.err)}</div><button class="btn" data-act="gradesReload">Спробувати ще раз</button>`)
+        : '<div class="spin" style="margin:60px auto;width:28px;height:28px"></div>';
+    }
+    const groups = new Map();
+    for (const it of g.items) {
+      const k = (it.subject || 'Без предмета') + (it.period ? ' · ' + it.period : '');
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(it);
+    }
+    const names = [...groups.keys()].sort((x, y) => x.localeCompare(y, 'uk'));
+    let h = '';
+    h += card(`
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <span>Усього оцінок</span>${badge(String(g.items.length), 'accent')}</div>
+      <div class="muted small">Перевірка нових оцінок — щодня о 20:00 за київським часом.${g.lastCheck ? ' Остання: ' + esc(dayMonth(g.lastCheck) + ', ' + hm(g.lastCheck)) + '.' : ''}</div>
+      <div class="${g.cls} small" ${g.msg ? '' : 'hidden'}>${esc(g.msg)}</div>
+      <button class="btn" data-act="gradesCheck" ${g.checking ? 'disabled' : ''}>${g.checking ? '<span class="spin"></span>' : 'Перевірити зараз'}</button>`);
+    if (!g.items.length) return h + `<div class="foot">${g.docs ? `У колекції grades (база «${esc(g.db)}») є документів: ${g.docs}, але масиву grades із оцінками в них немає.` : `У колекції grades (база «${esc(g.db)}») немає жодного документа. Якщо оцінки лежать в іншій базі, вкажіть її у змінній GRADES_DB.`}</div>`;
+    for (const name of names) {
+      const list = groups.get(name);
+      const nums = list.map((x) => numGrade(x.value)).filter((n) => n != null);
+      const avg = nums.length ? (nums.reduce((p, c) => p + c, 0) / nums.length).toFixed(2).replace(/\.?0+$/, '') : '';
+      h += `<div><div class="label" style="margin:0 0 6px 4px">${esc(name)} · ${list.length}${avg ? ' · сер. ' + esc(avg) : ''}</div><div class="list">${list.map((x) => {
+        const sub = [x.type, gradeDate(x.date), x.teacher].filter(Boolean).join(' · ');
+        const extra = !x.value && x.extra ? x.extra : '';
+        return `<div class="row"><span style="min-width:0">${esc(sub || (x.value ? 'Оцінка' : 'Запис'))}${extra ? `<span class="muted small" style="display:block">${esc(extra)}</span>` : ''}</span>${x.value ? badge(x.value, 'accent') : ''}</div>`;
+      }).join('')}</div></div>`;
+    }
+    return h;
+  }
+
+  async function loadGrades() {
+    S.grades.err = '';
+    try {
+      const r = await api('GET', '/api/admin/grades');
+      S.grades.items = r.items.map((x) => ({ ...x, date: x.date ? new Date(x.date) : null }));
+      S.grades.lastCheck = r.lastCheck ? new Date(r.lastCheck) : null;
+      S.grades.docs = r.docs; S.grades.db = r.db;
+    } catch (e) { S.grades.err = e.message; }
+    render();
+  }
+
   function viewNotify() {
     const n = S.notify;
     const opts = [`<option value="all" ${n.userId === 'all' ? 'selected' : ''}>Усім, хто увімкнув сповіщення</option>`]
@@ -760,6 +816,7 @@
     { id: 'today', title: 'Сьогодні', icon: 'bolt' },
     { id: 'schedule', title: 'Розклад', icon: 'calendar' },
     { id: 'homework', title: 'Домашня', icon: 'book' },
+    { id: 'grades', title: 'Оцінки', icon: 'star', admin: true },
     { id: 'notify', title: 'Сповіщення', icon: 'bell', admin: true },
     { id: 'settings', title: 'Налаштування', icon: 'gear' },
   ];
@@ -777,7 +834,7 @@
     if (S.tab === 'notify' && a && a.closest && a.closest('main') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не збиваємо введення
     const oldMain = $('main.content');
     const y = oldMain ? oldMain.scrollTop : 0;
-    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, notify: viewNotify, settings: viewSettings };
+    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, grades: viewGrades, notify: viewNotify, settings: viewSettings };
     const tabs = visibleTabs();
     const cur = tabs.find((t) => t.id === S.tab) || tabs[0];
     const q = moderationQueue().length;
@@ -1297,8 +1354,20 @@
   }
 
   const ACT = {
-    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); },
-    sync() { sync(); },
+    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); if (S.tab === 'grades') loadGrades(); },
+    gradesReload() { loadGrades(); },
+    async gradesCheck() {
+      const g = S.grades;
+      g.checking = true; g.msg = ''; render();
+      try {
+        const r = await api('POST', '/api/admin/grades/check');
+        g.msg = r.fresh ? `Нових оцінок: ${r.fresh}. Сповіщень доставлено: ${r.notified}.` : 'Нових оцінок немає.'; g.cls = 'ok';
+        await loadGrades();
+      } catch (e) { g.msg = e.message; g.cls = 'err'; }
+      g.checking = false;
+      render();
+    },
+    sync() { sync(); if (S.tab === 'grades' && isAdmin()) loadGrades(); },
     lesson(el) { openLesson(el.dataset.id); },
     day(el) { S.day = sod(new Date(+el.dataset.ts)); render(); },
     shift(el) { S.day = addDays(S.day, +el.dataset.d); render(); },
@@ -1630,7 +1699,7 @@
     else if (p.has('answered')) { answerNone(p.get('answered')); toast('Добре, відмітили'); }
     else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
     else if (p.get('tab') === 'moderation') { if (isMod()) { S.tab = 'homework'; render(); openModeration(); } }
-    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); }
+    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); if (S.tab === 'grades') loadGrades(); }
   }
 
   // ───────────── запуск ─────────────

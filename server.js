@@ -18,6 +18,7 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.DB_NAME || 'navs';
 const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
+const GRADES_DB = process.env.GRADES_DB || 'diary'; // база, де лежить колекція grades
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const MAX_DEVICES = parseInt(process.env.MAX_DEVICES, 10) || 5; // скільки пристроїв може мати одна людина
 
@@ -102,7 +103,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 // ───────────────────────── База даних ─────────────────────────
 
-let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers, hwImages;
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers, hwImages, grades, gradesSeen;
 let SECRET;
 let VAPID_KEY_ID = '';
 
@@ -134,6 +135,8 @@ async function initDb() {
   answers = db.collection('answers'); // кому з користувачів уже відповів на «Що задали?» (діє на всіх його пристроях)
   hwImages = db.collection('hwImages'); // зображення, прикріплені до домашнього
   noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
+  grades = client.db(GRADES_DB).collection('grades'); // оцінки (заповнюються поза цим сервером; тут лише читаємо)
+  gradesSeen = db.collection('gradesSeen'); // id оцінок, про які адміністратора вже сповіщено
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
   await lessons.createIndex({ start: 1 });
@@ -405,6 +408,149 @@ async function notifyDeviceRequest(user, label) {
     await Promise.allSettled(subs.map((s) => sendPush(s, payload)));
   } catch (e) {
     console.error('notifyDeviceRequest:', e);
+  }
+}
+
+
+// ───────────────────────── Оцінки ─────────────────────────
+// Колекція `grades` лише читається. Раз на добу (о GRADES_HOUR за APP_TZ, типово 20:00 за Києвом)
+// сервер порівнює її з уже баченими оцінками й сповіщає адміністратора про нові.
+
+const GRADES_HOUR = clampInt(process.env.GRADES_HOUR, 0, 23, 20);
+const pickField = (o, keys) => { for (const k of keys) if (o && o[k] != null && o[k] !== '') return o[k]; return ''; };
+const VALUE_KEYS = ['grade', 'value', 'mark', 'score', 'points', 'rating'];
+const DATE_KEYS = ['date', 'day', 'start', 'at', 'time'];
+const TYPE_KEYS = ['kind', 'type'];
+
+function parseGradeDate(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'string') {
+    const m = /^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})/.exec(v);
+    if (m) return new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], 12));
+    const k = /^(\d{4})(\d{2})(\d{2})-\d+/.exec(v.trim()); // id пари виду 20261012-3
+    if (k) return new Date(Date.UTC(+k[1], +k[2] - 1, +k[3], 12));
+  }
+  return toDate(v);
+}
+const gradeText = (v) => (v && typeof v === 'object' ? str(v.fullName || v.name || v.title || v.label || '', 200) : str(v, 200));
+const listText = (arr, single) => (Array.isArray(arr) ? arr : [single]).map(gradeText).filter(Boolean).join(', ');
+
+/**
+ * Один документ колекції grades = один предмет за період:
+ *   { period, subject, grades: [3, 4, 4, 4], lessons: [...], teachers: [...], kinds: [...], ... }
+ * Масиви grades і lessons паралельні: lessons[i] — пара, за яку виставлено grades[i].
+ * Повертає окремі оцінки; id оцінки = документ + пара + значення (нова пара або змінене значення = нова оцінка).
+ */
+function gradeEntries(doc, names) {
+  const subjRaw = str(pickField(doc, ['subject', 'subjectKey', 'name', 'discipline']), 200);
+  const subject = (names && names[subjRaw]) || subjRaw;
+  const teacher = listText(doc.teachers, doc.teacher);
+  const kinds = listText(doc.kinds, doc.kind);
+  const arr = Array.isArray(doc.grades) ? doc.grades : [];
+  const ls = Array.isArray(doc.lessons) && doc.lessons.length === arr.length ? doc.lessons : [];
+  return arr.map((g, i) => {
+    const obj = g && typeof g === 'object' ? g : null;
+    const l = ls.length ? ls[i] : null;
+    const lObj = l && typeof l === 'object' ? l : null;
+    const value = str(obj ? pickField(obj, VALUE_KEYS) : g, 40);
+    const date = parseGradeDate(pickField(obj, DATE_KEYS)) || parseGradeDate(lObj ? pickField(lObj, DATE_KEYS) : l);
+    const type = gradeText(pickField(obj, TYPE_KEYS)) || gradeText(pickField(lObj, TYPE_KEYS)) || kinds;
+    const lessonKey = l == null ? String(i) : typeof l === 'object' ? JSON.stringify(l) : String(l);
+    return {
+      id: `${doc._id}|${sha(lessonKey)}|${value}`,
+      subject, period: str(doc.period, 60), value, date, type, teacher,
+    };
+  });
+}
+const allGradeEntries = (docs, names) => docs.flatMap((d) => gradeEntries(d, names));
+
+async function adminPushSubs() {
+  const ids = new Set((await users.find({ isAdmin: true }).toArray()).map((a) => a._id));
+  return (await pushSubs.find({ 'settings.notificationsEnabled': true }).toArray()).filter((s) => ids.has(s.userId));
+}
+
+async function notifyNewGrades(list) {
+  const subs = await adminPushSubs();
+  if (!subs.length || !list.length) return 0;
+  let payloads;
+  if (list.length <= 3) {
+    payloads = list.map((g) => ({
+      title: `Нова оцінка: ${g.subject || 'предмет не вказано'}`,
+      body: `Оцінка: ${g.value || '—'}${g.type ? ' · ' + g.type : ''}${g.date ? ' · ' + fmtDay(g.date) : ''}`,
+      tag: 'grade-' + g.id,
+      data: { url: '/?tab=grades' },
+      ttl: 86400,
+    }));
+  } else {
+    const lines = list.map((g) => `${g.subject || '—'}: ${g.value || '—'}`).join('; ');
+    payloads = [{
+      title: `Нових оцінок: ${list.length}`,
+      body: lines.length > 220 ? lines.slice(0, 217) + '…' : lines,
+      tag: 'grades-' + Date.now(),
+      data: { url: '/?tab=grades' },
+      ttl: 86400,
+    }];
+  }
+  let delivered = 0;
+  for (const p of payloads) {
+    const res = await Promise.all(subs.map((s) => sendPush(s, p)));
+    delivered += res.filter((r) => r.ok).length;
+  }
+  return delivered;
+}
+
+/** Порівнює `grades` з уже баченими. notify=false — лише запам'ятати (перший запуск). */
+async function checkGrades({ notify = true } = {}) {
+  const names = await subjectNames();
+  const all = allGradeEntries(await grades.find({}).toArray(), names);
+  const seen = new Set((await gradesSeen.find({}, { projection: { _id: 1 } }).toArray()).map((x) => x._id));
+  const fresh = all.filter((g) => !seen.has(g.id));
+  if (fresh.length) {
+    await gradesSeen.insertMany(fresh.map((g) => ({ _id: g.id, at: new Date() })), { ordered: false }).catch((e) => {
+      if (!(e && (e.code === 11000 || (e.writeErrors || []).every((w) => w.code === 11000)))) throw e;
+    });
+  }
+  await config.updateOne({ _id: 'gradesLastCheck' }, { $set: { value: new Date() } }, { upsert: true });
+  let notified = 0;
+  if (notify && fresh.length) notified = await notifyNewGrades(fresh);
+  return { fresh: fresh.length, notified, total: all.length };
+}
+
+/** Перший запуск: поточні оцінки вважаємо «баченими», щоб не засипати сповіщеннями. */
+async function ensureGradesBaseline() {
+  if (await config.findOne({ _id: 'gradesBaseline' })) return;
+  await checkGrades({ notify: false });
+  await config.updateOne({ _id: 'gradesBaseline' }, { $set: { value: new Date() } }, { upsert: true });
+}
+
+function kyivNow() {
+  const p = {};
+  new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date()).forEach((x) => { p[x.type] = x.value; });
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: +p.hour };
+}
+
+let gradesBusy = false;
+async function gradesTick() {
+  if (gradesBusy) return;
+  const { date, hour } = kyivNow();
+  if (hour < GRADES_HOUR) return;
+  gradesBusy = true;
+  const key = `grades|${date}`;
+  try {
+    if (!(await claim(key))) return; // сьогодні вже перевіряли (навіть після перезапуску сервера)
+    try {
+      const r = await checkGrades();
+      console.log(`Оцінки: нових ${r.fresh}, сповіщень доставлено ${r.notified}`);
+    } catch (e) {
+      await sent.deleteOne({ _id: key }).catch(() => {}); // спробуємо ще раз на наступному тіку
+      throw e;
+    }
+  } catch (e) {
+    console.error('gradesTick:', e);
+  } finally {
+    gradesBusy = false;
   }
 }
 
@@ -855,6 +1001,17 @@ route('POST', '/api/admin/notify', async ({ body }) => {
   return { sent, total: subs.length };
 }, { admin: true });
 
+// — оцінки (адмін)
+route('GET', '/api/admin/grades', async () => {
+  const [docs, names, last] = await Promise.all([grades.find({}).toArray(), subjectNames(), config.findOne({ _id: 'gradesLastCheck' })]);
+  const items = allGradeEntries(docs, names);
+  items.sort((a, b) => (b.date ? +new Date(b.date) : 0) - (a.date ? +new Date(a.date) : 0));
+  return { items, docs: docs.length, db: GRADES_DB, lastCheck: (last && last.value) || null, hour: GRADES_HOUR };
+}, { admin: true });
+
+// Позачергова перевірка (за тією ж логікою, що й о 20:00): про нові оцінки приходить сповіщення.
+route('POST', '/api/admin/grades/check', async () => checkGrades(), { admin: true });
+
 route('POST', '/api/admin/users/:id/devices/:key/approve', async ({ params }) => {
   const user = await users.findOne({ _id: params.id });
   if (!user) throw new HttpError(404, 'Користувача не знайдено.');
@@ -1055,8 +1212,11 @@ const server = http.createServer((req, res) => {
 
 (async () => {
   VAPID_PUBLIC = await initDb();
+  await ensureGradesBaseline().catch((e) => console.error('ensureGradesBaseline:', e));
   server.listen(PORT, () => console.log(`Щоденник: сервер слухає порт ${PORT}`));
   setInterval(tick, TICK_MS);
+  setInterval(gradesTick, 60 * 1000);
+  gradesTick();
   cleanOrphanImages();
   setInterval(cleanOrphanImages, 6 * 3600 * 1000).unref();
 
