@@ -172,8 +172,8 @@ async function initDb() {
 
 const TOKEN_TTL = 365 * 24 * 3600 * 1000;
 
-function signToken(uid) {
-  const p = Buffer.from(JSON.stringify({ u: uid, t: Date.now() })).toString('base64url');
+function signToken(uid, deviceId) {
+  const p = Buffer.from(JSON.stringify({ u: uid, d: deviceId || '', t: Date.now() })).toString('base64url');
   const s = crypto.createHmac('sha256', SECRET).update(p).digest('base64url');
   return p + '.' + s;
 }
@@ -664,7 +664,7 @@ route('POST', '/api/auth/login', async ({ body, ip, req }) => {
       }
     }
   }
-  return { token: signToken(user._id), user: pubUser(user) };
+  return { token: signToken(user._id, deviceId), user: pubUser(user) };
 }, { auth: false });
 
 // — стан запиту на новий пристрій (клієнт опитує його, поки адміністратор не підтвердить)
@@ -973,11 +973,11 @@ route('GET', '/api/admin/users', async () => {
   return list.map((u) => {
     normDevices(u);
     return {
-      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', group: u.group || '',
+      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '',
       devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
       deviceList: u.deviceIds.map((id, i) => {
         const m = u.deviceMeta[devKey(id)] || {};
-        return { key: devKey(id), label: m.label || `Пристрій ${i + 1}`, addedAt: m.addedAt || null };
+        return { key: devKey(id), label: m.label || `Пристрій ${i + 1}`, addedAt: m.addedAt || null, studentId: m.studentId || '', studentName: m.studentName || '' };
       }),
       pending: u.pendingDevices.map((p) => ({ key: p.key || devKey(p.deviceId), label: p.label || 'Пристрій', requestedAt: p.requestedAt })),
     };
@@ -1005,6 +1005,31 @@ route('POST', '/api/admin/notify', async ({ body }) => {
   const sent = results.filter((r) => r.ok).length;
   if (!sent) throw new HttpError(502, 'Не вдалося доставити сповіщення: підписки застарілі. Користувачам треба ввімкнути їх знову.');
   return { sent, total: subs.length };
+}, { admin: true });
+
+// Список студентів для прив’язки до пристроїв.
+route('GET', '/api/admin/rating-students', async () => {
+  const rows = await ratings.find({}, { projection: { _id: 1, fullName: 1, group: 1 } }).sort({ fullName: 1 }).toArray();
+  return rows.map((r) => ({ id: r._id, fullName: r.fullName, group: r.group || '' }));
+}, { admin: true });
+
+// Прив’язка конкретного пристрою до запису студента в рейтингу.
+route('POST', '/api/admin/users/:id/devices/:key/student', async ({ params, body }) => {
+  const account = await users.findOne({ _id: params.id });
+  if (!account) throw new HttpError(404, 'Користувача не знайдено.');
+  normDevices(account);
+  const deviceId = account.deviceIds.find((id) => devKey(id) === params.key);
+  if (!deviceId) throw new HttpError(404, 'Пристрій не знайдено.');
+  const metaKey = devKey(deviceId);
+  const studentId = str(body.studentId, 64);
+  if (!studentId) {
+    await users.updateOne({ _id: account._id }, { $unset: { [`deviceMeta.${metaKey}.studentId`]: '', [`deviceMeta.${metaKey}.studentName`]: '' } });
+    return ok();
+  }
+  const student = await ratings.findOne({ _id: studentId });
+  if (!student) throw new HttpError(404, 'Студента не знайдено в рейтингу. Спочатку завантажте таблицю рейтингу.');
+  await users.updateOne({ _id: account._id }, { $set: { [`deviceMeta.${metaKey}.studentId`]: student._id, [`deviceMeta.${metaKey}.studentName`]: student.fullName } });
+  return { ok: true, student: student.fullName };
 }, { admin: true });
 
 // ───────────────────────── Рейтинг ─────────────────────────
@@ -1176,8 +1201,11 @@ const dupRating = (e) => { if (e && e.code === 11000) throw new HttpError(409, '
 
 // Студент отримує ЛИШЕ свою групу (параметр group ігнорується). Адміністратор може дивитись будь-яку.
 // Розбивку за предметами бачить лише сам студент (у своєму рядку) та адміністратор.
-route('GET', '/api/rating', async ({ user, query }) => {
-  const own = await groupOf(user);
+route('GET', '/api/rating', async ({ user, query, req }) => {
+  const deviceId = str(req.deviceId || req.headers['x-device-id'], 100);
+  const deviceMeta = user.deviceMeta && user.deviceMeta[devKey(deviceId)];
+  const assigned = deviceMeta && deviceMeta.studentId ? await ratings.findOne({ _id: deviceMeta.studentId }) : null;
+  const own = assigned ? assigned.group : (await groupOf(user));
   let group = own;
   let groups = null;
   if (user.isAdmin) {
@@ -1187,14 +1215,14 @@ route('GET', '/api/rating', async ({ user, query }) => {
   const subjects = await ratingSubjects();
   const want = str(query.get('subject'), 20);
   const subject = subjects.includes(want) ? want : ''; // '' — загальний рейтинг (сума балів)
-  if (!group) return { group: '', own: '', groups, subjects, subject, entries: [], me: null };
-  const meKey = ratingKey(user.fullName);
+  if (!group || (!user.isAdmin && !assigned)) return { group: '', own: '', groups, subjects, subject, entries: [], me: null, unassigned: !user.isAdmin && !assigned };
+  const meKey = assigned ? assigned.nameKey : ratingKey(user.fullName);
   const rows = await ratings.find({ group }).toArray();
   const ranked = rankEntries(subject
     ? rows.map((e) => ({ ...e, points: e.subjects && e.subjects[subject] != null ? e.subjects[subject] : null }))
     : rows);
   const entries = ranked.map((e) => {
-    const isMe = e.nameKey === meKey;
+    const isMe = assigned ? String(e._id) === String(assigned._id) : e.nameKey === meKey;
     return {
       ...(user.isAdmin ? { id: e._id } : {}),
       rank: e.rank, fullName: e.fullName, points: e.points, note: e.note || '', isMe,
@@ -1404,7 +1432,10 @@ async function handleApi(req, res, url) {
       const auth = req.headers.authorization || '';
       const data = verifyToken(auth.startsWith('Bearer ') ? auth.slice(7) : '');
       user = data && (await users.findOne({ _id: data.u }));
-      if (!user) throw new HttpError(401, 'Сеанс завершено.');
+      if (!user || !data.d) throw new HttpError(401, 'Оновіть сеанс: увійдіть у застосунок знову.');
+      const headerDevice = str(req.headers['x-device-id'], 100);
+      if (data.d && headerDevice && data.d !== headerDevice) throw new HttpError(401, 'Сеанс не належить цьому пристрою. Увійдіть знову.');
+      req.deviceId = data.d || headerDevice;
       if (r.admin && !user.isAdmin) throw new HttpError(403, 'Лише для адміністратора.');
       if (r.mod && !isMod(user)) throw new HttpError(403, 'Лише для адміністратора, старости чи заступника.');
     }

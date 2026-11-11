@@ -110,6 +110,7 @@
     const headers = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (S.token) headers.Authorization = 'Bearer ' + S.token;
+    if (deviceId) headers['X-Device-Id'] = deviceId;
     const ctrl = new AbortController();
     const kill = setTimeout(() => ctrl.abort(), 90000);
     if (++inflight === 1) slowTimer = setTimeout(() => { $('#banner').hidden = false; }, 6000);
@@ -826,8 +827,8 @@
       h += '<div class="rk-bar"><button class="btn small" data-act="ratingManage">Керувати</button></div>';
     }
     if (!d.group) {
-      return h + card(`<div class="next-title">${isAdmin() ? 'Груп ще немає' : 'Вас ще не додано до групи'}</div>
-        <div class="muted">${isAdmin() ? 'Натисніть «Керувати», створіть групу й додайте студентів у рейтинг.' : 'Адміністратор призначить вам групу — і тут з’явиться рейтинг вашої групи. Зайдіть пізніше або оновіть дані.'}</div>`);
+      return h + card(`<div class="next-title">${isAdmin() ? 'Груп ще немає' : (d.unassigned ? 'Пристрій ще не прив’язано до студента' : 'Студента ще немає в рейтингу')}</div>
+        <div class="muted">${isAdmin() ? 'Натисніть «Керувати», створіть групу й додайте студентів у рейтинг.' : (d.unassigned ? 'Адміністратор має відкрити «Учасники та пристрої» й вибрати ваше прізвище у полі «Студент» біля цього пристрою.' : 'Перевірте, чи завантажено актуальну таблицю рейтингу.')}</div>`);
     }
     const ranked = d.entries.filter((e) => e.rank != null);
     const unranked = d.entries.filter((e) => e.rank == null);
@@ -947,7 +948,7 @@
   function viewAdmin() {
     return `${ratingUploadBlock()}<div><div class="label gl">Рейтинг і групи</div><div class="list">
         ${tile('ratingManage', 'trophy', 'Керування рейтингом', 'Студенти, бали, групи')}
-        ${tile('users', 'users', 'Групи, учасники й пристрої', 'Призначення груп, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '')}
+        ${tile('users', 'users', 'Учасники та пристрої', 'Прив’язка студентів, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '')}
       </div></div>
       ${modBlocks(true)}
       <div><div class="label gl">Оцінки й сповіщення</div><div class="list">
@@ -971,7 +972,7 @@
         ${tile('moderation', 'book', 'Домашнє на підтвердження', 'Перевірка завдань від студентів', q ? badge(String(q), 'warn') : '')}
         ${tile('subjects', 'calendar', 'Предмети й посилання', 'Повні назви, Zoom / Meet')}
         ${tile('teachers', 'users', 'Викладачі', 'ПІБ викладачів у розкладі')}
-        ${isAdmin() && !inAdmin ? tile('users', 'shield', 'Учасники, ролі й пристрої', 'Групи, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '') : ''}
+        ${isAdmin() && !inAdmin ? tile('users', 'shield', 'Учасники та пристрої', 'Прив’язка студентів, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '') : ''}
       </div></div>`;
   }
 
@@ -1302,15 +1303,14 @@
   const fWhen = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? `${dayMonth(d)}, ${hm(d)}` : ''; };
 
   function openUsers() {
-    const s = { auto: false, title: 'Учасники й групи', users: null, err: '' };
+    const s = { auto: false, title: 'Учасники та пристрої', users: null, students: [], err: '' };
     s.render = () => {
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
       const list = [...s.users].sort((a, b) => (b.pending.length > 0) - (a.pending.length > 0) || a.fullName.localeCompare(b.fullName, 'uk'));
-      return '<div class="muted small">Староста й заступник можуть підтверджувати домашнє та завантажувати розклад. Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
+      return '<div class="muted small">Кожен пристрій можна окремо прив’язати до студента з рейтингової таблиці. Після прив’язки людина бачитиме особистий рейтинг цього студента. Нові пристрої підтверджуються адміністратором.</div>' +
         list.map((u) => card(`
           <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${roleBadge(u)}</div>
-          <label><span class="label">Група</span><select class="field" data-chg="userGroup" data-user="${esc(u.id)}"><option value="" ${!u.group ? 'selected' : ''}>Авто (за таблицею)</option>${(s.groups || []).map((g) => `<option value="${esc(g.name)}" ${u.group === g.name ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
           ${u.isAdmin ? '' : `<label><span class="label">Роль</span><select class="field" data-chg="userRole" data-user="${esc(u.id)}"><option value="" ${!u.role ? 'selected' : ''}>Студент</option><option value="starosta" ${u.role === 'starosta' ? 'selected' : ''}>Староста</option><option value="deputy" ${u.role === 'deputy' ? 'selected' : ''}>Заступник старости</option></select></label>`}
           ${u.pending.length ? `<div class="label" style="color:var(--warn)">Запити на новий пристрій</div>` + u.pending.map((p) => `
             <div class="dev"><div class="dn">${esc(p.label)}<div class="muted small">${esc(fWhen(p.requestedAt))}</div></div>
@@ -1318,14 +1318,16 @@
               <button class="btn red small" data-act="devReject" data-user="${esc(u.id)}" data-key="${esc(p.key)}">Ні</button></div></div>`).join('') : ''}
           <div class="label">Пристрої (${u.devices})</div>
           ${u.deviceList.length ? u.deviceList.map((d) => `
-            <div class="dev"><div class="dn">${esc(d.label)}${d.addedAt ? `<div class="muted small">додано ${esc(fWhen(d.addedAt))}</div>` : ''}</div>
+            <div class="dev"><div class="dn">${esc(d.label)}${d.addedAt ? `<div class="muted small">додано ${esc(fWhen(d.addedAt))}</div>` : ''}
+              <label class="small"><span class="label">Студент</span><select class="field" data-chg="deviceStudent" data-user="${esc(u.id)}" data-key="${esc(d.key)}"><option value="">Не прив’язано</option>${(s.students || []).map((st) => `<option value="${esc(st.id)}" ${d.studentId === st.id ? 'selected' : ''}>${esc(st.fullName)}${st.group ? ' · ' + esc(st.group) : ''}</option>`).join('')}</select></label>
+              <div class="muted small">${d.studentName ? 'Рейтинг: ' + esc(d.studentName) : 'Рейтинг не призначено'}</div></div>
               <button class="btn deep small" data-act="devRemove" data-user="${esc(u.id)}" data-key="${esc(d.key)}" data-name="${esc(u.fullName)}">Видалити</button></div>`).join('')
             : '<div class="muted small">Немає — перший пристрій, з якого людина увійде, стане основним.</div>'}
           <div class="btn-row">${u.devices > 1 ? `<button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати всі</button>` : ''}
             ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити людину</button>` : ''}</div>`, u.pending.length ? 'pending-box' : '')).join('');
     };
     s.reload = async () => {
-      try { [s.users, s.groups] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/groups')]); s.err = ''; } catch (e) { s.err = e.message; }
+      try { [s.users, s.students] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/rating-students')]); s.err = ''; } catch (e) { s.err = e.message; }
       if (sheets.includes(s)) rerender(s);
     };
     openSheet(s);
@@ -1923,10 +1925,10 @@
       importRating(f);
     } else if (el.dataset.chg === 'ratingPts') {
       ratingSavePts(el);
-    } else if (el.dataset.chg === 'userGroup') {
+    } else if (el.dataset.chg === 'deviceStudent') {
       const s = sheetOf(el);
-      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/group`, { group: el.value })
-        .then(() => { toast(el.value ? 'Групу призначено' : 'Групу знято'); if (s && s.reload) s.reload(); S.rating.data = null; })
+      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/devices/${encodeURIComponent(el.dataset.key)}/student`, { studentId: el.value })
+        .then(() => { toast(el.value ? 'Студента прив’язано до пристрою' : 'Прив’язку знято'); if (s && s.reload) s.reload(); })
         .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
     } else if (el.dataset.chg === 'notifyField') {
       S.notify[el.dataset.key] = el.value;
