@@ -21,6 +21,11 @@ const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
 const GRADES_DB = process.env.GRADES_DB || 'diary'; // база, де лежить колекція grades
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const MAX_DEVICES = parseInt(process.env.MAX_DEVICES, 10) || 5; // скільки пристроїв може мати одна людина
+const GOOGLE_SHEET_ID = (process.env.GOOGLE_SHEET_ID || '1grET3-MHCkBXqrBrHL1BIiUnAks0Kh3P4MuOijcPykY').trim();
+const GOOGLE_SHEET_GID = (process.env.GOOGLE_SHEET_GID || '0').trim();
+const GOOGLE_SHEET_GROUP = (process.env.GOOGLE_SHEET_GROUP || '101 СПД').trim();
+const GOOGLE_SERVICE_ACCOUNT_JSON = (process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+const GOOGLE_SHEET_INTERVAL_MS = Math.max(60000, parseInt(process.env.GOOGLE_SHEET_INTERVAL_MS, 10) || 5 * 60 * 1000);
 
 // Apple відхиляє підписи сповіщень (403 BadJwtToken), якщо «sub» фіктивний (example.com, you@…).
 // Тому підставну адресу замінюємо на https-адресу самого сервісу, а в логах просимо вказати реальну.
@@ -973,7 +978,8 @@ route('GET', '/api/admin/users', async () => {
   return list.map((u) => {
     normDevices(u);
     return {
-      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '',
+      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', group: u.group || '',
+      studentId: u.studentId || '', studentName: u.studentName || '',
       devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
       deviceList: u.deviceIds.map((id, i) => {
         const m = u.deviceMeta[devKey(id)] || {};
@@ -1011,6 +1017,34 @@ route('POST', '/api/admin/notify', async ({ body }) => {
 route('GET', '/api/admin/rating-students', async () => {
   const rows = await ratings.find({}, { projection: { _id: 1, fullName: 1, group: 1 } }).sort({ fullName: 1 }).toArray();
   return rows.map((r) => ({ id: r._id, fullName: r.fullName, group: r.group || '' }));
+}, { admin: true });
+
+// Прив’язка облікового запису до студента з рейтингу. Застосовується до всіх пристроїв цього акаунта.
+route('POST', '/api/admin/users/:id/student', async ({ params, body }) => {
+  const account = await users.findOne({ _id: params.id });
+  if (!account) throw new HttpError(404, 'Користувача не знайдено.');
+  normDevices(account);
+  const studentId = str(body.studentId, 64);
+  if (!studentId) {
+    const unset = { studentId: '', studentName: '' };
+    for (const id of account.deviceIds) {
+      const key = devKey(id);
+      unset[`deviceMeta.${key}.studentId`] = '';
+      unset[`deviceMeta.${key}.studentName`] = '';
+    }
+    await users.updateOne({ _id: account._id }, { $unset: unset });
+    return ok();
+  }
+  const student = await ratings.findOne({ _id: studentId });
+  if (!student) throw new HttpError(404, 'Студента не знайдено в рейтингу. Спочатку оновіть таблицю рейтингу.');
+  const set = { studentId: student._id, studentName: student.fullName };
+  for (const id of account.deviceIds) {
+    const key = devKey(id);
+    set[`deviceMeta.${key}.studentId`] = student._id;
+    set[`deviceMeta.${key}.studentName`] = student.fullName;
+  }
+  await users.updateOne({ _id: account._id }, { $set: set });
+  return { ok: true, student: student.fullName };
 }, { admin: true });
 
 // Прив’язка конкретного пристрою до запису студента в рейтингу.
@@ -1135,6 +1169,150 @@ const sumPoints = (subj) => {
   return v.length ? Math.round(v.reduce((a, b) => a + b, 0) * 100) / 100 : null;
 };
 
+let googleTokenCache = { token: '', expiresAt: 0 };
+
+function b64url(value) {
+  return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url');
+}
+
+async function googleSheetsAccessToken() {
+  if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
+    throw new Error('Не налаштовано GOOGLE_SERVICE_ACCOUNT_JSON. Додайте ключ сервісного акаунта в секрети сервера; таблицю не потрібно робити публічною.');
+  }
+  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
+  let credentials;
+  try { credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON); }
+  catch { throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON має містити коректний JSON ключа сервісного акаунта.'); }
+  if (!credentials.client_email || !credentials.private_key) throw new Error('У ключі сервісного акаунта немає client_email або private_key.');
+  const now = Math.floor(Date.now() / 1000);
+  const header = b64url({ alg: 'RS256', typ: 'JWT' });
+  const claim = b64url({
+    iss: credentials.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
+    aud: credentials.token_uri || 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  });
+  const unsigned = `${header}.${claim}`;
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), credentials.private_key).toString('base64url');
+  const assertion = `${unsigned}.${signature}`;
+  const tokenResponse = await fetch(credentials.token_uri || 'https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const tokenBody = await tokenResponse.json().catch(() => ({}));
+  if (!tokenResponse.ok || !tokenBody.access_token) throw new Error(`Google OAuth: ${tokenBody.error_description || tokenBody.error || `HTTP ${tokenResponse.status}`}`);
+  googleTokenCache = { token: tokenBody.access_token, expiresAt: Date.now() + (Number(tokenBody.expires_in) || 3600) * 1000 };
+  return googleTokenCache.token;
+}
+
+async function readGoogleSheetGrid() {
+  const token = await googleSheetsAccessToken();
+  const headers = { Authorization: `Bearer ${token}` };
+  const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(GOOGLE_SHEET_ID)}`;
+  const metaResponse = await fetch(`${base}?fields=${encodeURIComponent('sheets.properties(sheetId,title)')}`, { headers, signal: AbortSignal.timeout(20000) });
+  const meta = await metaResponse.json().catch(() => ({}));
+  if (!metaResponse.ok) throw new Error(`Не вдалося прочитати Google-таблицю: ${meta.error && meta.error.message || `HTTP ${metaResponse.status}`}`);
+  const sheet = (meta.sheets || []).map((x) => x.properties || {}).find((x) => String(x.sheetId) === GOOGLE_SHEET_GID);
+  if (!sheet) throw new Error(`У таблиці немає аркуша з gid=${GOOGLE_SHEET_GID}. Перевірте GOOGLE_SHEET_GID.`);
+  const range = `'${String(sheet.title).replace(/'/g, "''")}'!A:Z`;
+  const valuesResponse = await fetch(`${base}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`, { headers, signal: AbortSignal.timeout(20000) });
+  const data = await valuesResponse.json().catch(() => ({}));
+  if (!valuesResponse.ok) throw new Error(`Не вдалося завантажити значення аркуша: ${data.error && data.error.message || `HTTP ${valuesResponse.status}`}`);
+  return data.values || [];
+}
+
+function parseRatingGrid(grid) {
+  const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  const nameHead = /(^|\s)(піб|прізвище)/i;
+  const skipHead = /^(№|n|#|разом|сума|всього|total|місце|рейтинг|середній)/i;
+  let headRow = -1, nameCol = -1;
+  for (let r = 0; r < Math.min(grid.length, 30) && headRow < 0; r++) {
+    for (let c = 0; c < (grid[r] || []).length; c++) {
+      if (nameHead.test(clean(grid[r][c]))) { headRow = r; nameCol = c; break; }
+    }
+  }
+  if (headRow < 0) throw new Error('У Google-таблиці не знайдено заголовок колонки «ПІБ» або «Прізвище».');
+  const subjects = [], cols = [];
+  const head = grid[headRow] || [];
+  for (let c = nameCol + 1; c < head.length; c++) {
+    const name = clean(head[c]).replace(/[.$]/g, '');
+    if (!name || skipHead.test(name) || subjects.includes(name)) continue;
+    subjects.push(name); cols.push(c);
+  }
+  if (!subjects.length) throw new Error('Праворуч від колонки ПІБ не знайдено предметів.');
+  const entries = [], seen = new Set();
+  for (let r = headRow + 1; r < grid.length; r++) {
+    let fullName = clean((grid[r] || [])[nameCol]);
+    if (!fullName) continue;
+    let note = '';
+    fullName = clean(fullName.replace(/\(([^)]*)\)/g, (_, value) => { note = note || clean(value); return ' '; }));
+    const key = ratingKey(fullName);
+    if (fullName.split(' ').length < 2 || seen.has(key)) continue;
+    seen.add(key);
+    const scores = {};
+    subjects.forEach((subject, i) => {
+      const raw = clean((grid[r] || [])[cols[i]]).replace(',', '.');
+      if (!raw) return;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0 && n <= 100000) scores[subject] = Math.round(n * 100) / 100;
+    });
+    entries.push({ fullName, nameKey: key, note, subjects: scores, points: sumPoints(scores) });
+  }
+  if (!entries.length) throw new Error('У Google-таблиці не знайдено жодного студента.');
+  return { subjects, entries };
+}
+
+let googleRatingSyncBusy = false;
+async function syncGoogleSheetRating() {
+  if (!GOOGLE_SHEET_ID || googleRatingSyncBusy) return;
+  googleRatingSyncBusy = true;
+  const startedAt = new Date();
+  try {
+    const parsed = parseRatingGrid(await readGoogleSheetGrid());
+    const group = GOOGLE_SHEET_GROUP || DEFAULT_RATING_GROUP;
+    if (parsed.entries.length > 1000) throw new Error('У таблиці понад 1000 студентів — синхронізацію зупинено.');
+
+    const now = new Date();
+    const keys = parsed.entries.map((e) => e.nameKey);
+    await ratings.bulkWrite(parsed.entries.map((e) => ({
+      updateOne: {
+        filter: { group, nameKey: e.nameKey },
+        update: {
+          $set: { fullName: e.fullName, subjects: e.subjects, points: e.points, note: e.note, updatedAt: now, source: 'google-sheets' },
+          $setOnInsert: { _id: crypto.randomUUID(), createdAt: now },
+        },
+        upsert: true,
+      },
+    })), { ordered: false });
+    // Видаляємо лише після успішного завантаження й перевірки повного набору рядків.
+    await ratings.deleteMany({ group, nameKey: { $nin: keys } });
+    await ensureGroup(group);
+    await config.updateOne({ _id: 'ratingSubjects' }, { $set: { value: parsed.subjects } }, { upsert: true });
+    const state = { enabled: true, lastSuccessAt: now, lastAttemptAt: startedAt, lastError: '', students: parsed.entries.length, subjects: parsed.subjects.length, group, source: 'Google Sheets' };
+    await config.updateOne({ _id: 'googleRatingSync' }, { $set: { value: state } }, { upsert: true });
+    console.log(`Google Sheets: рейтинг оновлено — ${parsed.entries.length} студентів, ${parsed.subjects.length} предметів.`);
+    return state;
+  } catch (error) {
+    const previous = await config.findOne({ _id: 'googleRatingSync' }).catch(() => null);
+    const old = previous && previous.value ? previous.value : {};
+    const state = { ...old, enabled: true, lastAttemptAt: startedAt, lastError: String(error.message || error).slice(0, 500) };
+    await config.updateOne({ _id: 'googleRatingSync' }, { $set: { value: state } }, { upsert: true }).catch(() => {});
+    console.error('Google Sheets rating sync:', state.lastError);
+    return state;
+  } finally {
+    googleRatingSyncBusy = false;
+  }
+}
+
+route('POST', '/api/admin/rating/sync', async () => {
+  const state = await syncGoogleSheetRating();
+  if (!state || state.lastError) throw new HttpError(502, state && state.lastError || 'Синхронізація не виконана.');
+  return { ok: true, ...state };
+}, { admin: true });
+
 // Завантаження таблиці рейтингу (розібраної в браузері адміна): повністю оновлює рейтинг групи.
 // Студенти зіставляються за ПІБ: наявним оновлюються бали, нових додає, яких немає у файлі — видаляє.
 route('PUT', '/api/admin/rating/import', async ({ user, body }) => {
@@ -1204,7 +1382,10 @@ const dupRating = (e) => { if (e && e.code === 11000) throw new HttpError(409, '
 route('GET', '/api/rating', async ({ user, query, req }) => {
   const deviceId = str(req.deviceId || req.headers['x-device-id'], 100);
   const deviceMeta = user.deviceMeta && user.deviceMeta[devKey(deviceId)];
-  const assigned = deviceMeta && deviceMeta.studentId ? await ratings.findOne({ _id: deviceMeta.studentId }) : null;
+  // Прив’язка в картці учасника має пріоритет і діє на всі його пристрої;
+  // якщо її немає — підтримуємо стару окрему прив’язку конкретного пристрою.
+  const assignedId = (deviceMeta && deviceMeta.studentId) || user.studentId || '';
+  const assigned = assignedId ? await ratings.findOne({ _id: assignedId }) : null;
   const own = assigned ? assigned.group : (await groupOf(user));
   let group = own;
   let groups = null;
@@ -1215,7 +1396,7 @@ route('GET', '/api/rating', async ({ user, query, req }) => {
   const subjects = await ratingSubjects();
   const want = str(query.get('subject'), 20);
   const subject = subjects.includes(want) ? want : ''; // '' — загальний рейтинг (сума балів)
-  if (!group || (!user.isAdmin && !assigned)) return { group: '', own: '', groups, subjects, subject, entries: [], me: null, unassigned: !user.isAdmin && !assigned };
+  if (!group || (!user.isAdmin && !assigned)) { const syncDoc = user.isAdmin ? await config.findOne({ _id: 'googleRatingSync' }) : null; return { group: '', own: '', groups, subjects, subject, entries: [], me: null, unassigned: !user.isAdmin && !assigned, ...(user.isAdmin ? { syncStatus: syncDoc && syncDoc.value || { enabled: !!GOOGLE_SHEET_ID } } : {}) }; }
   const meKey = assigned ? assigned.nameKey : ratingKey(user.fullName);
   const rows = await ratings.find({ group }).toArray();
   const ranked = rankEntries(subject
@@ -1230,7 +1411,8 @@ route('GET', '/api/rating', async ({ user, query, req }) => {
     };
   });
   const me = entries.find((e) => e.isMe) || null;
-  return { group, own, groups, subjects, subject, entries, total: entries.length, me: me && { rank: me.rank, points: me.points } };
+  const syncDoc = user.isAdmin ? await config.findOne({ _id: 'googleRatingSync' }) : null;
+  return { group, own, groups, subjects, subject, entries, total: entries.length, me: me && { rank: me.rank, points: me.points }, ...(user.isAdmin ? { syncStatus: syncDoc && syncDoc.value || { enabled: !!GOOGLE_SHEET_ID } } : {}) };
 });
 
 route('GET', '/api/admin/groups', async () => listGroups(), { admin: true });
@@ -1510,6 +1692,11 @@ const server = http.createServer((req, res) => {
 (async () => {
   VAPID_PUBLIC = await initDb();
   await ensureGradesBaseline().catch((e) => console.error('ensureGradesBaseline:', e));
+  if (GOOGLE_SHEET_ID) {
+    await syncGoogleSheetRating();
+    setInterval(syncGoogleSheetRating, GOOGLE_SHEET_INTERVAL_MS).unref();
+    console.log(`Google Sheets sync увімкнено: кожні ${Math.round(GOOGLE_SHEET_INTERVAL_MS / 60000)} хв.`);
+  }
   server.listen(PORT, () => console.log(`Щоденник: сервер слухає порт ${PORT}`));
   setInterval(tick, TICK_MS);
   setInterval(gradesTick, 60 * 1000);
