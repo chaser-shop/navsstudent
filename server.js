@@ -103,7 +103,7 @@ const placeTitle = (l) => (l.isRemote ? 'Дистанційно' : l.room ? 'а�
 
 // ───────────────────────── База даних ─────────────────────────
 
-let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers, hwImages, grades, gradesSeen;
+let db, users, lessons, subjects, teachers, homework, pushSubs, sent, config, noHw, answers, hwImages, grades, gradesSeen, ratings, groupsCol;
 let SECRET;
 let VAPID_KEY_ID = '';
 
@@ -137,8 +137,12 @@ async function initDb() {
   noHw = db.collection('noHomework'); // пари, на які адміністратор сказав «нічого не задали»
   grades = client.db(GRADES_DB).collection('grades'); // оцінки (заповнюються поза цим сервером; тут лише читаємо)
   gradesSeen = db.collection('gradesSeen'); // id оцінок, про які адміністратора вже сповіщено
+  ratings = db.collection('ratings'); // рейтинг студентів: один запис = студент у групі
+  groupsCol = db.collection('groups'); // навчальні групи (_id = назва)
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
+  await ratings.createIndex({ group: 1, nameKey: 1 }, { unique: true });
+  await ratings.createIndex({ nameKey: 1 });
   await lessons.createIndex({ start: 1 });
   await lessons.createIndex({ end: 1 });
   await homework.createIndex({ due: 1 });
@@ -148,6 +152,8 @@ async function initDb() {
   await answers.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await noHw.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await sent.createIndex({ at: 1 }, { expireAfterSeconds: 3 * 24 * 3600 });
+
+  await seedRating();
 
   SECRET = process.env.JWT_SECRET || (await getConfig('jwtSecret', () => crypto.randomBytes(32).toString('hex')));
 
@@ -967,7 +973,7 @@ route('GET', '/api/admin/users', async () => {
   return list.map((u) => {
     normDevices(u);
     return {
-      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '',
+      id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', group: u.group || '',
       devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
       deviceList: u.deviceIds.map((id, i) => {
         const m = u.deviceMeta[devKey(id)] || {};
@@ -999,6 +1005,196 @@ route('POST', '/api/admin/notify', async ({ body }) => {
   const sent = results.filter((r) => r.ok).length;
   if (!sent) throw new HttpError(502, 'Не вдалося доставити сповіщення: підписки застарілі. Користувачам треба ввімкнути їх знову.');
   return { sent, total: subs.length };
+}, { admin: true });
+
+// ───────────────────────── Рейтинг ─────────────────────────
+// Ключ для зіставлення студента з обліковим записом: без дужок на кшталт «(староста)», єдиний апостроф.
+const ratingKey = (n) => normKey(String(n || '').replace(/\([^)]*\)/g, ' ').replace(/[`'ʼ‘’]/g, '’'));
+const cleanGroup = (v) => str(normName(v), 40);
+
+function cleanPoints(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(String(v).replace(',', '.'));
+  if (!Number.isFinite(n) || n < 0 || n > 100000) throw new HttpError(400, 'Бали — число від 0 до 100000.');
+  return Math.round(n * 100) / 100;
+}
+
+function cleanSubjects(o) {
+  const out = {};
+  if (o && typeof o === 'object' && !Array.isArray(o)) {
+    for (const [k, v] of Object.entries(o).slice(0, 20)) {
+      const key = str(k, 20).replace(/[.$]/g, '');
+      const val = key ? cleanPoints(v) : null;
+      if (val !== null) out[key] = val;
+    }
+  }
+  return out;
+}
+
+// Місця: за спаданням балів; однакові бали — однакове місце (1, 2, 2, 4). Без балів — без місця, внизу.
+function rankEntries(list) {
+  const sorted = [...list].sort((a, b) => (b.points == null ? -1 : b.points) - (a.points == null ? -1 : a.points) || a.fullName.localeCompare(b.fullName, 'uk'));
+  let prev = null;
+  let rank = 0;
+  return sorted.map((e, i) => {
+    if (e.points == null) return { ...e, rank: null };
+    if (e.points !== prev) { rank = i + 1; prev = e.points; }
+    return { ...e, rank };
+  });
+}
+
+// Група студента: призначена адміністратором, інакше — з рейтингової таблиці за ПІБ.
+async function groupOf(user) {
+  if (user.group) return user.group;
+  const e = await ratings.findOne({ nameKey: ratingKey(user.fullName) });
+  return e ? e.group : '';
+}
+
+async function listGroups() {
+  const [named, rAgg, uAgg] = await Promise.all([
+    groupsCol.find({}).toArray(),
+    ratings.aggregate([{ $group: { _id: '$group', n: { $sum: 1 } } }]).toArray(),
+    users.aggregate([{ $match: { group: { $type: 'string', $ne: '' } } }, { $group: { _id: '$group', n: { $sum: 1 } } }]).toArray(),
+  ]);
+  const map = new Map();
+  const get = (name) => { if (!map.has(name)) map.set(name, { name, students: 0, accounts: 0 }); return map.get(name); };
+  named.forEach((g) => get(g._id));
+  rAgg.forEach((g) => { get(g._id).students = g.n; });
+  uAgg.forEach((g) => { get(g._id).accounts = g.n; });
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'uk'));
+}
+
+const ensureGroup = (name) => groupsCol.updateOne({ _id: name }, { $setOnInsert: { createdAt: new Date() } }, { upsert: true });
+
+// Одноразовий безпечний імпорт першої таблиці (seed/rating-101-spd.json). Не перезаписує вже наявні записи.
+async function seedRating() {
+  const KEY = 'ratingSeed101spd';
+  if (await config.findOne({ _id: KEY })) return;
+  let seed;
+  try { seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'seed', 'rating-101-spd.json'), 'utf8')); } catch (e) { return; }
+  const now = new Date();
+  let added = 0;
+  for (const e of seed.entries || []) {
+    try {
+      await ratings.insertOne({
+        _id: crypto.randomUUID(), group: seed.group, fullName: e.fullName, nameKey: ratingKey(e.fullName),
+        points: e.points == null ? null : e.points, subjects: e.subjects || {}, note: e.note || '', createdAt: now, updatedAt: now, source: seed.source,
+      });
+      added++;
+    } catch (err) { if (!err || err.code !== 11000) throw err; }
+  }
+  await ensureGroup(seed.group);
+  await config.updateOne({ _id: KEY }, { $set: { value: { at: now, added } } }, { upsert: true });
+  console.log(`Рейтинг: імпортовано ${added} студентів групи «${seed.group}».`);
+}
+
+function readRatingBody(body, full) {
+  const set = {};
+  if (full || 'fullName' in body) {
+    const n = normName(body.fullName);
+    if (n.split(' ').length < 2 || n.length > 100) throw new HttpError(400, 'Введіть прізвище та ім’я (ПІБ).');
+    set.fullName = n;
+    set.nameKey = ratingKey(n);
+  }
+  if (full || 'group' in body) {
+    const g = cleanGroup(body.group);
+    if (!g) throw new HttpError(400, 'Оберіть групу.');
+    set.group = g;
+  }
+  if (full || 'points' in body) set.points = cleanPoints(body.points);
+  if ('subjects' in body) set.subjects = cleanSubjects(body.subjects);
+  if ('note' in body) set.note = str(body.note, 60);
+  set.updatedAt = new Date();
+  return set;
+}
+
+const dupRating = (e) => { if (e && e.code === 11000) throw new HttpError(409, 'Цей студент уже є в рейтингу цієї групи.'); throw e; };
+
+// Студент отримує ЛИШЕ свою групу (параметр group ігнорується). Адміністратор може дивитись будь-яку.
+// Розбивку за предметами бачить лише сам студент (у своєму рядку) та адміністратор.
+route('GET', '/api/rating', async ({ user, query }) => {
+  const own = await groupOf(user);
+  let group = own;
+  let groups = null;
+  if (user.isAdmin) {
+    groups = await listGroups();
+    group = cleanGroup(query.get('group')) || own || (groups[0] ? groups[0].name : '');
+  }
+  if (!group) return { group: '', own: '', groups, entries: [], me: null };
+  const meKey = ratingKey(user.fullName);
+  const ranked = rankEntries(await ratings.find({ group }).toArray());
+  const entries = ranked.map((e) => {
+    const isMe = e.nameKey === meKey;
+    return {
+      ...(user.isAdmin ? { id: e._id } : {}),
+      rank: e.rank, fullName: e.fullName, points: e.points, note: e.note || '', isMe,
+      ...(isMe || user.isAdmin ? { subjects: e.subjects || {} } : {}),
+    };
+  });
+  const me = entries.find((e) => e.isMe) || null;
+  return { group, own, groups, entries, total: entries.length, me: me && { rank: me.rank, points: me.points } };
+});
+
+route('GET', '/api/admin/groups', async () => listGroups(), { admin: true });
+
+route('POST', '/api/admin/groups', async ({ body }) => {
+  const name = cleanGroup(body.name);
+  if (!name) throw new HttpError(400, 'Введіть назву групи.');
+  await ensureGroup(name);
+  return { name };
+}, { admin: true });
+
+route('PATCH', '/api/admin/groups', async ({ body }) => {
+  const from = cleanGroup(body.from);
+  const to = cleanGroup(body.to);
+  if (!from || !to) throw new HttpError(400, 'Вкажіть стару й нову назву групи.');
+  if (from === to) return ok();
+  try {
+    await ratings.updateMany({ group: from }, { $set: { group: to } });
+  } catch (e) { dupRating(e); }
+  await users.updateMany({ group: from }, { $set: { group: to } });
+  await groupsCol.deleteOne({ _id: from });
+  await ensureGroup(to);
+  return ok();
+}, { admin: true });
+
+route('DELETE', '/api/admin/groups/:name', async ({ params }) => {
+  const name = cleanGroup(params.name);
+  if ((await ratings.countDocuments({ group: name })) || (await users.countDocuments({ group: name }))) {
+    throw new HttpError(409, 'Група не порожня: спершу видаліть її студентів із рейтингу й зніміть групу в учасників.');
+  }
+  await groupsCol.deleteOne({ _id: name });
+  return ok();
+}, { admin: true });
+
+route('POST', '/api/admin/rating', async ({ body }) => {
+  const doc = { _id: crypto.randomUUID(), createdAt: new Date(), subjects: {}, note: '', ...readRatingBody(body, true) };
+  try { await ratings.insertOne(doc); } catch (e) { dupRating(e); }
+  await ensureGroup(doc.group);
+  return { id: doc._id };
+}, { admin: true });
+
+route('PATCH', '/api/admin/rating/:id', async ({ params, body }) => {
+  const set = readRatingBody(body, false);
+  let r;
+  try { r = await ratings.updateOne({ _id: params.id }, { $set: set }); } catch (e) { dupRating(e); }
+  if (!r.matchedCount) throw new HttpError(404, 'Запис не знайдено.');
+  if (set.group) await ensureGroup(set.group);
+  return ok();
+}, { admin: true });
+
+route('DELETE', '/api/admin/rating/:id', async ({ params }) => {
+  const r = await ratings.deleteOne({ _id: params.id });
+  if (!r.deletedCount) throw new HttpError(404, 'Запис не знайдено.');
+  return ok();
+}, { admin: true });
+
+route('POST', '/api/admin/users/:id/group', async ({ params, body }) => {
+  const g = cleanGroup(body.group);
+  const r = await users.updateOne({ _id: params.id }, g ? { $set: { group: g } } : { $unset: { group: '' } });
+  if (!r.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
+  if (g) await ensureGroup(g);
+  return ok();
 }, { admin: true });
 
 // — оцінки (адмін)

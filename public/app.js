@@ -40,6 +40,7 @@
     deviceRequests: 0,
     noHw: new Set(),
     schedMsg: { text: '', cls: 'muted' },
+    rating: { data: null, group: '', err: '' },
     grades: { items: null, lastCheck: null, err: '', checking: false, msg: '', cls: 'muted' },
     notify: { users: null, userId: 'all', title: '', body: '', msg: '', cls: 'muted', sending: false, err: '' },
   };
@@ -65,7 +66,7 @@
 
   // ───────────── оформлення ─────────────
 
-  const PALETTE = ['#5865F2', '#23A559', '#EB459E', '#F0B232', '#3BA5C3', '#ED4245', '#9B84EE'];
+  const PALETTE = ['#0A84FF', '#30B455', '#FF375F', '#FF9F0A', '#32ADE6', '#BF5AF2', '#5E5CE6'];
   function subjColor(name) {
     let sum = 0;
     for (const ch of String(name)) sum = (sum + ch.codePointAt(0)) & 0xFFFF;
@@ -87,6 +88,10 @@
     refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/>',
     left: '<path d="M15 18l-6-6 6-6"/>',
     right: '<path d="M9 18l6-6-6-6"/>',
+    trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>',
+    shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
+    trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     star: '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
   };
   const ic = (name, size = 22) =>
@@ -181,6 +186,7 @@
       applySync(r);
       LS.set('cache', r);
       S.syncError = '';
+      loadRating(undefined, true);
       await ensurePush();
       maybeAskPush();
     } catch (e) {
@@ -194,7 +200,7 @@
 
   function resetLocal() {
     S.lessons = []; S.homework = []; S.subjects = {}; S.teachers = {}; S.scheduleTitle = '';
-    S.answered = new Set(); S.done = new Set(); S.syncError = ''; S.pushEnsured = false;
+    S.answered = new Set(); S.done = new Set(); S.syncError = ''; S.pushEnsured = false; S.rating = { data: null, group: '', err: '' };
     LS.del('cache'); LS.set('answered', []); LS.set('done', []);
   }
 
@@ -596,7 +602,10 @@
   // ───────────── екрани ─────────────
 
   function viewToday() {
-    let h = installHint();
+    const first = (S.user.fullName.split(' ')[1] || S.user.fullName.split(' ')[0] || '');
+    let h = `<div class="greet"><small>${esc(cap(weekdayName(new Date())))}, ${esc(dayMonth(new Date()))}</small><h2>Привіт, ${esc(first)}</h2></div>`;
+    h += ratingMini();
+    h += installHint();
     if (!S.lessons.length) {
       h += card(`<div class="next-title">Розкладу ще немає</div><div class="muted">${isMod()
         ? 'Відкрийте вкладку «Налаштування» і завантажте файл розкладу (.xls) — його одразу побачать усі студенти.'
@@ -753,6 +762,193 @@
     return p.subscribed ? 'Увімкнено на цьому пристрої' : 'Не увімкнено';
   }
 
+  // ───────────── рейтинг ─────────────
+
+  const fPts = new Intl.NumberFormat('uk-UA', { maximumFractionDigits: 2 });
+  const ptsText = (p) => (p == null ? '—' : fPts.format(p));
+  const shortName = (n) => String(n).split(' ').slice(0, 2).join(' ');
+  const initialsOf = (n) => String(n).split(' ').slice(0, 2).map((w) => w.charAt(0)).join('').toUpperCase();
+  const medalOf = (r) => (r === 1 ? 'm1' : r === 2 ? 'm2' : r === 3 ? 'm3' : '');
+  const studentsWord = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'студент' : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100) ? 'студенти' : 'студентів');
+
+  // quiet — фонове оновлення: помилки не показуються
+  async function loadRating(group, quiet) {
+    const R = S.rating;
+    if (group !== undefined) R.group = group;
+    R.err = '';
+    try {
+      const q = isAdmin() && R.group ? '?group=' + encodeURIComponent(R.group) : '';
+      R.data = await api('GET', '/api/rating' + q);
+      if (isAdmin()) R.group = R.data.group;
+    } catch (e) { if (!quiet) R.err = e.message; }
+    render();
+    sheets.filter((x) => x.isRatingAdmin).forEach(rerender);
+  }
+
+  function ratingMini() {
+    const me = S.rating.data && S.rating.data.entries.find((e) => e.isMe);
+    if (!me) return '';
+    return `<button class="card mini-rank" data-act="tab" data-tab="rating">
+      <span class="mr-ic">${ic('trophy', 22)}</span>
+      <span class="mr-t"><small>Рейтинг · ${esc(S.rating.data.group)}</small><b>${me.rank != null ? me.rank + ' місце з ' + S.rating.data.total : 'Бали ще не внесено'}</b></span>
+      <span class="mr-p">${esc(ptsText(me.points))}<small>балів</small></span></button>`;
+  }
+
+  function rkRow(e) {
+    return `<div class="rk ${medalOf(e.rank)} ${e.isMe ? 'me' : ''}" ${e.isMe ? 'id="rk-me"' : ''}>
+      <span class="rk-pos">${e.rank != null ? e.rank : '–'}</span>
+      <span class="rk-name">${esc(e.fullName)}${e.note ? ' ' + badge(e.note, 'accent') : ''}${e.isMe ? ' <i class="you">Ви</i>' : ''}</span>
+      <b class="rk-pts">${esc(ptsText(e.points))}</b></div>`;
+  }
+
+  function viewRating() {
+    const R = S.rating;
+    const d = R.data;
+    if (!d) {
+      return R.err ? card(`<div class="err">${esc(R.err)}</div><button class="btn" data-act="ratingReload">Спробувати ще раз</button>`)
+        : '<div class="spin" style="margin:60px auto;width:28px;height:28px"></div>';
+    }
+    let h = '';
+    if (isAdmin()) {
+      const opts = (d.groups || []).map((g) => `<option value="${esc(g.name)}" ${g.name === d.group ? 'selected' : ''}>${esc(g.name)} · ${g.students}</option>`).join('');
+      h += `<div class="rk-bar"><select class="field" data-chg="ratingGroup" aria-label="Група" ${opts ? '' : 'disabled'}>${opts || '<option>Груп ще немає</option>'}</select>
+        <button class="btn small" data-act="ratingManage">Керувати</button></div>`;
+    }
+    if (!d.group) {
+      return h + card(`<div class="next-title">${isAdmin() ? 'Груп ще немає' : 'Вас ще не додано до групи'}</div>
+        <div class="muted">${isAdmin() ? 'Натисніть «Керувати», створіть групу й додайте студентів у рейтинг.' : 'Адміністратор призначить вам групу — і тут з’явиться рейтинг вашої групи. Зайдіть пізніше або оновіть дані.'}</div>`);
+    }
+    const ranked = d.entries.filter((e) => e.rank != null);
+    const unranked = d.entries.filter((e) => e.rank == null);
+    const me = d.entries.find((e) => e.isMe);
+    if (me) {
+      const subj = Object.entries(me.subjects || {});
+      h += `<div class="card hero"><span class="label">Ваше місце · ${esc(d.group)}</span>
+        <div class="hero-main">
+          <div class="hero-pos"><b>${me.rank != null ? me.rank : '—'}</b><span>${me.rank != null ? 'місце з ' + d.total : 'бали ще не внесено'}</span></div>
+          <div class="hero-pts"><b>${esc(ptsText(me.points))}</b><span>балів</span></div></div>
+        ${subj.length ? `<div class="subj-chips">${subj.map(([k, v]) => `<span class="sc"><small>${esc(k)}</small>${esc(ptsText(v))}</span>`).join('')}</div>` : ''}
+        <button class="btn deep" data-act="ratingJump">Показати мій рядок</button></div>`;
+    } else {
+      h += card(`<span class="label">Група ${esc(d.group)}</span>
+        <div class="muted">${isAdmin() ? `Студентів у рейтингу: ${d.total}.` : 'Вас немає в рейтингу цієї групи — адміністратор ще не вніс ваші бали.'}</div>`);
+    }
+    if (ranked.length >= 3) {
+      h += `<div class="podium">${[1, 0, 2].map((i) => { const e = ranked[i]; return `<div class="pd p${i + 1} ${medalOf(e.rank)} ${e.isMe ? 'me' : ''}">
+        <div class="pd-av">${esc(initialsOf(e.fullName))}</div><div class="pd-name">${esc(shortName(e.fullName))}</div>
+        <div class="pd-pts">${esc(ptsText(e.points))}</div><div class="pd-step">${e.rank}</div></div>`; }).join('')}</div>`;
+    }
+    h += `<div class="section"><div class="sec-head"><span class="label">Рейтинг групи</span><span class="muted small">${d.total} ${studentsWord(d.total)}</span></div>
+      <div class="rk-list">${ranked.length ? ranked.map(rkRow).join('') : '<div class="rk"><span class="muted">Балів ще ніхто не має</span></div>'}</div></div>`;
+    if (unranked.length) h += `<div class="section"><div class="sec-head"><span class="label">Без балів</span></div><div class="rk-list">${unranked.map(rkRow).join('')}</div></div>`;
+    return h + '<div class="foot">Рейтинг оновлюється автоматично після змін адміністратором. Однакові бали — однакове місце.</div>';
+  }
+
+  // ───────────── керування рейтингом (адмін) ─────────────
+
+  const ratingCols = () => {
+    const cols = [];
+    for (const e of (S.rating.data && S.rating.data.entries) || []) for (const k of Object.keys(e.subjects || {})) if (!cols.includes(k)) cols.push(k);
+    return cols;
+  };
+
+  function openRatingAdmin() {
+    const s = { auto: false, isRatingAdmin: true, form: null, title: () => (s.form ? (s.form.id ? 'Студент' : 'Новий студент') : 'Керування рейтингом') };
+    s.render = () => {
+      const d = S.rating.data;
+      if (!d) return '<div class="muted">Завантаження…</div>';
+      if (s.form) return ratingFormHTML(s.form, d);
+      const opts = (d.groups || []).map((g) => `<option value="${esc(g.name)}" ${g.name === d.group ? 'selected' : ''}>${esc(g.name)} · ${g.students}</option>`).join('');
+      let h = '<div class="muted small">Зміни одразу бачать студенти групи. Бали можна змінювати прямо в списку — вони зберігаються після введення.</div>';
+      h += card(`<span class="label">Група</span>
+        <select class="field" data-chg="ratingGroup" ${opts ? '' : 'disabled'}>${opts || '<option>Груп ще немає</option>'}</select>
+        <div class="btn-row"><button class="btn deep" data-act="groupNew">Нова група</button>${d.group ? '<button class="btn deep" data-act="groupRename">Перейменувати</button>' : ''}</div>
+        ${d.group && !d.entries.length ? `<button class="btn red" data-act="groupDel" data-name="${esc(d.group)}">Видалити порожню групу</button>` : ''}`);
+      if (!d.group) return h;
+      h += `<button class="btn" data-act="ratingAdd">${ic('plus', 18)} Додати студента</button>`;
+      h += d.entries.length ? `<div class="list">${d.entries.map((e) => `<div class="ra-row">
+          <button class="ra-name" data-act="ratingEdit" data-id="${esc(e.id)}"><span class="rk-pos ${medalOf(e.rank)}">${e.rank != null ? e.rank : '–'}</span><span>${esc(e.fullName)}${e.note ? ' <small class="muted">· ' + esc(e.note) + '</small>' : ''}</span></button>
+          <input class="field ra-pts" type="number" inputmode="decimal" min="0" step="any" placeholder="—" value="${e.points != null ? e.points : ''}" data-prev="${e.points != null ? e.points : ''}" data-chg="ratingPts" data-id="${esc(e.id)}" aria-label="Бали: ${esc(e.fullName)}">
+          <button class="icon-btn danger" data-act="ratingDel" data-id="${esc(e.id)}" data-name="${esc(e.fullName)}" aria-label="Видалити">${ic('trash', 18)}</button></div>`).join('')}</div>`
+        : card('<span class="muted">У цій групі ще немає студентів.</span>');
+      return h;
+    };
+    openSheet(s);
+    loadRating();
+  }
+
+  function ratingFormHTML(f, d) {
+    const cols = ratingCols();
+    const gopts = (d.groups || []).map((g) => `<option value="${esc(g.name)}" ${g.name === f.group ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
+    return `<div class="form">
+      <label><span class="label">ПІБ</span><input class="field" name="fullName" autocapitalize="words" placeholder="Прізвище Ім’я По батькові" value="${esc(f.fullName)}"></label>
+      <label><span class="label">Група</span><select class="field" name="group">${gopts}</select></label>
+      <label><span class="label">Бали (разом)</span><input class="field" name="points" type="number" inputmode="decimal" min="0" step="any" placeholder="Порожньо — без балів" value="${f.points != null ? esc(f.points) : ''}"></label>
+      <label><span class="label">Примітка</span><input class="field" name="note" maxlength="60" placeholder="Наприклад: староста" value="${esc(f.note)}"></label>
+      <div class="label">Бали за предметами (необов’язково — сума підставляється в «Разом»)</div>
+      <div class="subj-grid">${cols.map((c) => `<label><span class="small muted">${esc(c)}</span><input class="field" name="s_${esc(c)}" type="number" inputmode="decimal" min="0" step="any" data-inp="ratingSubj" value="${f.subjects[c] != null ? esc(f.subjects[c]) : ''}"></label>`).join('')}</div>
+      <div class="subj-grid"><label><span class="small muted">Інший предмет</span><input class="field" name="x_name" maxlength="20" placeholder="Назва"></label>
+        <label><span class="small muted">Бали</span><input class="field" name="x_val" type="number" inputmode="decimal" min="0" step="any" data-inp="ratingSubj"></label></div>
+      <div class="muted small" data-role="msg"></div>
+      <div class="btn-row"><button class="btn deep" data-act="ratingCancel">Скасувати</button><button class="btn" data-act="ratingSave">Зберегти</button></div></div>`;
+  }
+
+  function ratingFormBody(el) {
+    const root = sheetOf(el).el;
+    const v = (n) => { const i = root.querySelector(`[name="${n}"]`); return i ? i.value.trim() : ''; };
+    const subjects = {};
+    root.querySelectorAll('[name^="s_"]').forEach((i) => { if (i.value.trim() !== '') subjects[i.name.slice(2)] = i.value.trim(); });
+    if (v('x_name') && v('x_val') !== '') subjects[v('x_name')] = v('x_val');
+    return { fullName: v('fullName'), group: v('group'), points: v('points') === '' ? null : v('points'), note: v('note'), subjects };
+  }
+
+  async function ratingSavePts(el) {
+    const raw = el.value.trim();
+    if (raw === el.dataset.prev) return;
+    try {
+      await api('PATCH', `/api/admin/rating/${encodeURIComponent(el.dataset.id)}`, { points: raw === '' ? null : raw });
+      toast('Бали збережено');
+      await loadRating();
+    } catch (e) { toast(e.message); el.value = el.dataset.prev; }
+  }
+
+  // ───────────── адмін-панель ─────────────
+
+  function tile(act, icon, title, sub, extra = '', attrs = '') {
+    return `<button class="tile" data-act="${act}" ${attrs}><span class="tile-ic">${ic(icon, 20)}</span><span class="tile-t">${title}<small>${sub}</small></span>${extra}<span class="tile-go">${ic('right', 16)}</span></button>`;
+  }
+
+  function viewAdmin() {
+    return `<div><div class="label gl">Рейтинг і групи</div><div class="list">
+        ${tile('ratingManage', 'trophy', 'Керування рейтингом', 'Студенти, бали, групи')}
+        ${tile('users', 'users', 'Групи, учасники й пристрої', 'Призначення груп, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '')}
+      </div></div>
+      ${modBlocks(true)}
+      <div><div class="label gl">Оцінки й сповіщення</div><div class="list">
+        ${tile('go', 'star', 'Оцінки', 'Перегляд і перевірка нових оцінок', '', 'data-tab="grades"')}
+        ${tile('go', 'bell', 'Сповіщення', 'Надіслати повідомлення студентам', '', 'data-tab="notify"')}
+      </div></div>`;
+  }
+
+  // Блоки «Розклад» і «Керування» — для адміністратора (вкладка «Адмін») та старости/заступника (у профілі).
+  function modBlocks(inAdmin) {
+    const q = moderationQueue().length;
+    return `<div><div class="label gl">Розклад</div><div class="list">
+        <div>${S.lessons.length
+          ? `${S.scheduleTitle ? `<div>${esc(S.scheduleTitle)}</div>` : ''}<div class="muted small">Пар у розкладі: ${S.lessons.length}${scheduleRange()}</div>`
+          : '<span class="muted">Розклад не завантажено</span>'}</div>
+        <label class="row" style="cursor:pointer"><span style="color:var(--accent);font-weight:600">Завантажити розклад (.xls / .xlsx / .csv)</span>
+          <input type="file" id="schedFile" data-chg="schedFile" accept=".xls,.xlsx,.csv,.txt,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden></label>
+        <div id="schedMsg" class="${S.schedMsg.cls} small" ${S.schedMsg.text ? '' : 'hidden'}>${esc(S.schedMsg.text)}</div>
+      </div><div class="foot">Файл розбирається у браузері й відправляється на сервер — розклад одразу побачать усі. Новий файл замінює пари від його першої дати, а домашнє й посилання лишаються.</div></div>
+      <div><div class="label gl">Керування</div><div class="list">
+        ${tile('moderation', 'book', 'Домашнє на підтвердження', 'Перевірка завдань від студентів', q ? badge(String(q), 'warn') : '')}
+        ${tile('subjects', 'calendar', 'Предмети й посилання', 'Повні назви, Zoom / Meet')}
+        ${tile('teachers', 'users', 'Викладачі', 'ПІБ викладачів у розкладі')}
+        ${isAdmin() && !inAdmin ? tile('users', 'shield', 'Учасники, ролі й пристрої', 'Групи, ролі, запити на вхід', S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : '') : ''}
+      </div></div>`;
+  }
+
   function viewSettings() {
     const st = S.settings;
     const toggle = (key, label) => `<label class="row"><span>${label}</span><span class="toggle"><input type="checkbox" data-chg="setting" data-key="${key}" ${st[key] ? 'checked' : ''}><span></span></span></label>`;
@@ -766,24 +962,10 @@
       <button class="row" data-act="logout"><span style="color:var(--red)">Вийти</span></button>
     </div>${!isMod() ? '<div class="foot">Посилання на пари й імена викладачів налаштовують адміністратор і староста.</div>' : ''}</div>`;
 
-    if (isMod()) {
-      h += `<div><div class="label" style="margin:0 0 6px 4px">Розклад</div><div class="list">
-        <div>${S.lessons.length
-          ? `${S.scheduleTitle ? `<div>${esc(S.scheduleTitle)}</div>` : ''}<div class="muted small">Пар у розкладі: ${S.lessons.length}${scheduleRange()}</div>`
-          : '<span class="muted">Розклад не завантажено</span>'}</div>
-        <label class="row" style="cursor:pointer"><span style="color:var(--accent);font-weight:600">Завантажити розклад (.xls / .xlsx / .csv)</span>
-          <input type="file" id="schedFile" data-chg="schedFile" accept=".xls,.xlsx,.csv,.txt,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" hidden></label>
-        <div id="schedMsg" class="${S.schedMsg.cls} small" ${S.schedMsg.text ? '' : 'hidden'}>${esc(S.schedMsg.text)}</div>
-      </div><div class="foot">Файл розбирається у браузері й відправляється на сервер — розклад одразу побачать усі. Новий файл замінює пари від його першої дати, а домашнє й посилання лишаються.</div></div>`;
+    if (isMod() && !isAdmin()) h += modBlocks(false);
 
-      const q = moderationQueue().length;
-      h += `<div><div class="label" style="margin:0 0 6px 4px">Керування</div><div class="list">
-        <button class="row" data-act="moderation"><span>Домашнє на підтвердження</span>${q ? badge(String(q), 'warn') : ''}</button>
-        <button class="row" data-act="subjects"><span>Предмети й посилання</span></button>
-        <button class="row" data-act="teachers"><span>Викладачі</span></button>
-        ${isAdmin() ? `<button class="row" data-act="users"><span>Учасники, ролі й пристрої</span>${S.deviceRequests ? badge(String(S.deviceRequests), 'warn') : ''}</button>` : ''}
-      </div></div>`;
-    }
+    const theme = LS.get('theme', 'auto');
+    h += `<div><div class="label gl">Вигляд</div><div class="seg" role="group" aria-label="Тема">${[['auto', 'Авто'], ['light', 'Світла'], ['dark', 'Темна']].map(([k, t]) => `<button class="${theme === k ? 'on' : ''}" data-act="theme" data-mode="${k}">${t}</button>`).join('')}</div></div>`;
 
     h += installHint();
     h += `<div><div class="label" style="margin:0 0 6px 4px">Сповіщення</div><div class="list">
@@ -813,13 +995,16 @@
   }
 
   const TABS = [
-    { id: 'today', title: 'Сьогодні', icon: 'bolt' },
-    { id: 'schedule', title: 'Розклад', icon: 'calendar' },
-    { id: 'homework', title: 'Домашня', icon: 'book' },
-    { id: 'grades', title: 'Оцінки', icon: 'star', admin: true },
-    { id: 'notify', title: 'Сповіщення', icon: 'bell', admin: true },
-    { id: 'settings', title: 'Налаштування', icon: 'gear' },
+    { id: 'today', title: 'Сьогодні', short: 'Головна', icon: 'bolt' },
+    { id: 'schedule', title: 'Розклад', short: 'Розклад', icon: 'calendar' },
+    { id: 'homework', title: 'Домашня', short: 'Домашнє', icon: 'book' },
+    { id: 'rating', title: 'Рейтинг', short: 'Рейтинг', icon: 'trophy' },
+    { id: 'admin', title: 'Адмін-панель', short: 'Адмін', icon: 'shield', admin: true },
+    { id: 'settings', title: 'Налаштування', short: 'Профіль', icon: 'gear' },
   ];
+  // Підсторінки адмін-панелі: лишаються окремими екранами, повертаються кнопкою «назад».
+  const SUBS = { grades: { id: 'grades', title: 'Оцінки', parent: 'admin' }, notify: { id: 'notify', title: 'Сповіщення', parent: 'admin' } };
+  let lastTab = null;
   const visibleTabs = () => TABS.filter((t) => !t.admin || isAdmin());
 
   function render() {
@@ -834,19 +1019,23 @@
     if (S.tab === 'notify' && a && a.closest && a.closest('main') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не збиваємо введення
     const oldMain = $('main.content');
     const y = oldMain ? oldMain.scrollTop : 0;
-    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, grades: viewGrades, notify: viewNotify, settings: viewSettings };
+    const views = { today: viewToday, schedule: viewSchedule, homework: viewHomework, rating: viewRating, admin: viewAdmin, grades: viewGrades, notify: viewNotify, settings: viewSettings };
     const tabs = visibleTabs();
-    const cur = tabs.find((t) => t.id === S.tab) || tabs[0];
+    const sub = isAdmin() ? SUBS[S.tab] : null;
+    const cur = sub || tabs.find((t) => t.id === S.tab) || tabs[0];
+    const activeTab = sub ? sub.parent : cur.id;
+    const entering = lastTab !== cur.id;
+    lastTab = cur.id;
     const q = moderationQueue().length;
     app.innerHTML = `
-      <header class="topbar"><h1>${cur.title}</h1><div class="right">
+      <header class="topbar"><div class="tb-l">${sub ? `<button class="icon-btn" data-act="back" aria-label="Назад">${ic('left', 22)}</button>` : ''}<h1>${cur.title}</h1></div><div class="right">
         ${S.tab === 'schedule' ? '<button class="link" data-act="goToday">Сьогодні</button>' : ''}
         <button class="icon-btn ${S.syncing ? 'refreshing' : ''}" data-act="sync" aria-label="Оновити">${ic('refresh', 20)}</button>
       </div></header>
-      <main class="content">${views[cur.id]()}</main>
+      <main class="content ${entering ? 'enter' : ''}">${views[cur.id]()}</main>
       <nav class="tabbar"><div class="tabbar-in">${tabs.map((t) => `
-        <button class="tab ${t.id === S.tab ? 'active' : ''}" data-act="tab" data-tab="${t.id}">${ic(t.icon, 22)}<span>${t.title}</span>
-          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}${t.id === 'settings' && isAdmin() && S.deviceRequests ? `<span class="dot">${S.deviceRequests}</span>` : ''}</button>`).join('')}</div></nav>`;
+        <button class="tab ${t.id === activeTab ? 'active' : ''}" data-act="tab" data-tab="${t.id}">${ic(t.icon, 22)}<span>${t.short}</span>
+          ${t.id === 'homework' && q ? `<span class="dot">${q}</span>` : ''}${t.id === 'admin' && S.deviceRequests ? `<span class="dot">${S.deviceRequests}</span>` : ''}</button>`).join('')}</div></nav>`;
     const newMain = $('main.content');
     if (newMain) newMain.scrollTop = y;
     refreshSheets();
@@ -1087,7 +1276,7 @@
   const fWhen = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? `${dayMonth(d)}, ${hm(d)}` : ''; };
 
   function openUsers() {
-    const s = { auto: false, title: 'Учасники й пристрої', users: null, err: '' };
+    const s = { auto: false, title: 'Учасники й групи', users: null, err: '' };
     s.render = () => {
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
@@ -1095,6 +1284,7 @@
       return '<div class="muted small">Староста й заступник можуть підтверджувати домашнє та завантажувати розклад. Одна людина може мати кілька пристроїв. Коли вона входить з нового, тут з’являється запит — підтвердіть його, і вхід відбудеться автоматично. Якщо пристрій втрачено — видаліть його зі списку.</div>' +
         list.map((u) => card(`
           <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${roleBadge(u)}</div>
+          <label><span class="label">Група</span><select class="field" data-chg="userGroup" data-user="${esc(u.id)}"><option value="" ${!u.group ? 'selected' : ''}>Авто (за таблицею)</option>${(s.groups || []).map((g) => `<option value="${esc(g.name)}" ${u.group === g.name ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
           ${u.isAdmin ? '' : `<label><span class="label">Роль</span><select class="field" data-chg="userRole" data-user="${esc(u.id)}"><option value="" ${!u.role ? 'selected' : ''}>Студент</option><option value="starosta" ${u.role === 'starosta' ? 'selected' : ''}>Староста</option><option value="deputy" ${u.role === 'deputy' ? 'selected' : ''}>Заступник старости</option></select></label>`}
           ${u.pending.length ? `<div class="label" style="color:var(--warn)">Запити на новий пристрій</div>` + u.pending.map((p) => `
             <div class="dev"><div class="dn">${esc(p.label)}<div class="muted small">${esc(fWhen(p.requestedAt))}</div></div>
@@ -1109,7 +1299,7 @@
             ${u.id !== S.user.id ? `<button class="btn red" data-act="deleteUser" data-id="${esc(u.id)}" data-name="${esc(u.fullName)}">Видалити людину</button>` : ''}</div>`, u.pending.length ? 'pending-box' : '')).join('');
     };
     s.reload = async () => {
-      try { s.users = await api('GET', '/api/admin/users'); s.err = ''; } catch (e) { s.err = e.message; }
+      try { [s.users, s.groups] = await Promise.all([api('GET', '/api/admin/users'), api('GET', '/api/admin/groups')]); s.err = ''; } catch (e) { s.err = e.message; }
       if (sheets.includes(s)) rerender(s);
     };
     openSheet(s);
@@ -1354,7 +1544,55 @@
   }
 
   const ACT = {
-    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); if (S.tab === 'grades') loadGrades(); },
+    tab(el) { S.tab = el.dataset.tab; const m0 = $('main.content'); if (m0) m0.scrollTop = 0; render(); const m1 = $('main.content'); if (m1) m1.scrollTop = 0; if (S.tab === 'notify') loadNotifyUsers(); if (S.tab === 'grades') loadGrades(); if (S.tab === 'rating') loadRating(); },
+    go(el) { ACT.tab(el); },
+    back() { S.tab = 'admin'; render(); },
+    ratingReload() { loadRating(); },
+    ratingManage() { openRatingAdmin(); },
+    ratingJump() { const r = $('#rk-me'); if (r) r.scrollIntoView({ block: 'center', behavior: 'smooth' }); },
+    theme(el) { LS.set('theme', el.dataset.mode); if (window.__applyTheme) window.__applyTheme(); render(); },
+    ratingAdd(el) { const s = sheetOf(el); const d = S.rating.data; s.form = { fullName: '', group: d.group, points: null, note: '', subjects: {} }; rerender(s); },
+    ratingEdit(el) {
+      const s = sheetOf(el); const d = S.rating.data;
+      const e = d.entries.find((x) => x.id === el.dataset.id); if (!e) return;
+      s.form = { id: e.id, fullName: e.fullName, group: d.group, points: e.points, note: e.note || '', subjects: Object.assign({}, e.subjects) };
+      rerender(s);
+    },
+    ratingCancel(el) { const s = sheetOf(el); s.form = null; rerender(s); },
+    async ratingSave(el) {
+      const s = sheetOf(el); const body = ratingFormBody(el);
+      await withBusy(el, async () => {
+        try {
+          if (s.form.id) await api('PATCH', `/api/admin/rating/${encodeURIComponent(s.form.id)}`, body);
+          else await api('POST', '/api/admin/rating', body);
+          if (body.group !== S.rating.group) S.rating.group = body.group;
+          s.form = null;
+          toast('Збережено');
+          await loadRating();
+        } catch (e) { setMsg(s.el, e.message, 'err'); }
+      });
+    },
+    async ratingDel(el) {
+      if (!confirm(`Видалити «${el.dataset.name}» з рейтингу?`)) return;
+      await withBusy(el, async () => {
+        try { await api('DELETE', `/api/admin/rating/${encodeURIComponent(el.dataset.id)}`); toast('Видалено'); await loadRating(); } catch (e) { toast(e.message); }
+      });
+    },
+    async groupNew() {
+      const name = (prompt('Назва нової групи (наприклад, 101 СПД)') || '').trim();
+      if (!name) return;
+      try { await api('POST', '/api/admin/groups', { name }); await loadRating(name); } catch (e) { toast(e.message); }
+    },
+    async groupRename() {
+      const from = S.rating.data.group;
+      const to = (prompt('Нова назва групи', from) || '').trim();
+      if (!to || to === from) return;
+      try { await api('PATCH', '/api/admin/groups', { from, to }); toast('Групу перейменовано'); await loadRating(to); } catch (e) { toast(e.message); }
+    },
+    async groupDel(el) {
+      if (!confirm(`Видалити порожню групу «${el.dataset.name}»?`)) return;
+      try { await api('DELETE', `/api/admin/groups/${encodeURIComponent(el.dataset.name)}`); toast('Групу видалено'); await loadRating(''); } catch (e) { toast(e.message); }
+    },
     gradesReload() { loadGrades(); },
     async gradesCheck() {
       const g = S.grades;
@@ -1628,6 +1866,15 @@
       api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/role`, { role: el.value })
         .then(() => { toast('Роль змінено'); if (s && s.reload) s.reload(); })
         .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
+    } else if (el.dataset.chg === 'ratingGroup') {
+      loadRating(el.value);
+    } else if (el.dataset.chg === 'ratingPts') {
+      ratingSavePts(el);
+    } else if (el.dataset.chg === 'userGroup') {
+      const s = sheetOf(el);
+      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/group`, { group: el.value })
+        .then(() => { toast(el.value ? 'Групу призначено' : 'Групу знято'); if (s && s.reload) s.reload(); S.rating.data = null; })
+        .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
     } else if (el.dataset.chg === 'notifyField') {
       S.notify[el.dataset.key] = el.value;
     } else if (el.dataset.chg === 'hwImages' && el.files && el.files.length) {
@@ -1645,6 +1892,13 @@
   document.addEventListener('input', (e) => {
     const el = e.target.closest('[data-inp]');
     if (el && el.dataset.inp === 'notifyField') S.notify[el.dataset.key] = el.value;
+    if (el && el.dataset.inp === 'ratingSubj') {
+      const root = el.closest('.sh-body');
+      let sum = 0; let any = false;
+      root.querySelectorAll('[data-inp="ratingSubj"]').forEach((i) => { if (i.value.trim() !== '' && Number.isFinite(+i.value)) { sum += +i.value; any = true; } });
+      const t = root.querySelector('[name="points"]');
+      if (any && t) t.value = String(Math.round(sum * 100) / 100);
+    }
   });
 
   document.addEventListener('submit', async (e) => {
@@ -1697,9 +1951,9 @@
     if (p.has('lesson')) openLesson(p.get('lesson'), { join: p.get('join') === '1' });
     else if (p.has('homework')) { const l = lessonById(p.get('homework')); openHomeworkForm(l ? newHomework(l) : blankHomework()); }
     else if (p.has('answered')) { answerNone(p.get('answered')); toast('Добре, відмітили'); }
-    else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'settings'; render(); openUsers(); } }
+    else if (p.get('tab') === 'users') { if (isAdmin()) { S.tab = 'admin'; render(); openUsers(); } }
     else if (p.get('tab') === 'moderation') { if (isMod()) { S.tab = 'homework'; render(); openModeration(); } }
-    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) ? p.get('tab') : 'today'; render(); if (S.tab === 'grades') loadGrades(); }
+    else if (p.get('tab')) { S.tab = visibleTabs().some((t) => t.id === p.get('tab')) || (isAdmin() && SUBS[p.get('tab')]) ? p.get('tab') : 'today'; render(); if (S.tab === 'grades') loadGrades(); if (S.tab === 'rating') loadRating(); }
   }
 
   // ───────────── запуск ─────────────
