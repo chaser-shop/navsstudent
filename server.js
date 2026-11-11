@@ -1019,50 +1019,25 @@ route('GET', '/api/admin/rating-students', async () => {
   return rows.map((r) => ({ id: r._id, fullName: r.fullName, group: r.group || '' }));
 }, { admin: true });
 
-// Прив’язка облікового запису до студента з рейтингу. Застосовується до всіх пристроїв цього акаунта.
+// Прив’язка запису рейтингу до облікового запису людини, а не до пристрою.
+// Усі підтверджені пристрої цього облікового запису показують один і той самий рейтинг.
 route('POST', '/api/admin/users/:id/student', async ({ params, body }) => {
   const account = await users.findOne({ _id: params.id });
   if (!account) throw new HttpError(404, 'Користувача не знайдено.');
-  normDevices(account);
   const studentId = str(body.studentId, 64);
   if (!studentId) {
-    const unset = { studentId: '', studentName: '' };
-    for (const id of account.deviceIds) {
-      const key = devKey(id);
-      unset[`deviceMeta.${key}.studentId`] = '';
-      unset[`deviceMeta.${key}.studentName`] = '';
-    }
-    await users.updateOne({ _id: account._id }, { $unset: unset });
+    await users.updateOne(
+      { _id: account._id },
+      { $unset: { studentId: '', studentName: '' } }
+    );
     return ok();
   }
   const student = await ratings.findOne({ _id: studentId });
   if (!student) throw new HttpError(404, 'Студента не знайдено в рейтингу. Спочатку оновіть таблицю рейтингу.');
-  const set = { studentId: student._id, studentName: student.fullName };
-  for (const id of account.deviceIds) {
-    const key = devKey(id);
-    set[`deviceMeta.${key}.studentId`] = student._id;
-    set[`deviceMeta.${key}.studentName`] = student.fullName;
-  }
-  await users.updateOne({ _id: account._id }, { $set: set });
-  return { ok: true, student: student.fullName };
-}, { admin: true });
-
-// Прив’язка конкретного пристрою до запису студента в рейтингу.
-route('POST', '/api/admin/users/:id/devices/:key/student', async ({ params, body }) => {
-  const account = await users.findOne({ _id: params.id });
-  if (!account) throw new HttpError(404, 'Користувача не знайдено.');
-  normDevices(account);
-  const deviceId = account.deviceIds.find((id) => devKey(id) === params.key);
-  if (!deviceId) throw new HttpError(404, 'Пристрій не знайдено.');
-  const metaKey = devKey(deviceId);
-  const studentId = str(body.studentId, 64);
-  if (!studentId) {
-    await users.updateOne({ _id: account._id }, { $unset: { [`deviceMeta.${metaKey}.studentId`]: '', [`deviceMeta.${metaKey}.studentName`]: '' } });
-    return ok();
-  }
-  const student = await ratings.findOne({ _id: studentId });
-  if (!student) throw new HttpError(404, 'Студента не знайдено в рейтингу. Спочатку завантажте таблицю рейтингу.');
-  await users.updateOne({ _id: account._id }, { $set: { [`deviceMeta.${metaKey}.studentId`]: student._id, [`deviceMeta.${metaKey}.studentName`]: student.fullName } });
+  await users.updateOne(
+    { _id: account._id },
+    { $set: { studentId: student._id, studentName: student.fullName } }
+  );
   return { ok: true, student: student.fullName };
 }, { admin: true });
 
@@ -1380,11 +1355,9 @@ const dupRating = (e) => { if (e && e.code === 11000) throw new HttpError(409, '
 // Студент отримує ЛИШЕ свою групу (параметр group ігнорується). Адміністратор може дивитись будь-яку.
 // Розбивку за предметами бачить лише сам студент (у своєму рядку) та адміністратор.
 route('GET', '/api/rating', async ({ user, query, req }) => {
-  const deviceId = str(req.deviceId || req.headers['x-device-id'], 100);
-  const deviceMeta = user.deviceMeta && user.deviceMeta[devKey(deviceId)];
-  // Прив’язка в картці учасника має пріоритет і діє на всі його пристрої;
-  // якщо її немає — підтримуємо стару окрему прив’язку конкретного пристрою.
-  const assignedId = (deviceMeta && deviceMeta.studentId) || user.studentId || '';
+  // Рейтинг прив’язаний тільки до облікового запису людини.
+  // Ідентифікатор пристрою використовується лише для авторизації, не для вибору студента.
+  const assignedId = user.studentId || '';
   const assigned = assignedId ? await ratings.findOne({ _id: assignedId }) : null;
   const own = assigned ? assigned.group : (await groupOf(user));
   let group = own;

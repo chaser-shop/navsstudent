@@ -1310,7 +1310,7 @@
       if (s.err) return `<div class="err">${esc(s.err)}</div>`;
       if (!s.users) return '<div class="muted">Завантаження…</div>';
       const list = [...s.users].sort((a, b) => (b.pending.length > 0) - (a.pending.length > 0) || a.fullName.localeCompare(b.fullName, 'uk'));
-      return '<div class="muted small">Кожен пристрій можна окремо прив’язати до студента з рейтингової таблиці. Після прив’язки людина бачитиме особистий рейтинг цього студента. Нові пристрої підтверджуються адміністратором.</div>' +
+      return '<div class="muted small">Оберіть студента рейтингу для облікового запису людини. Прив’язка зберігається за людиною, тому всі її підтверджені пристрої показуватимуть один і той самий рейтинг. Нові пристрої підтверджуються адміністратором.</div>' +
         list.map((u) => card(`
           <div style="display:flex;justify-content:space-between;gap:8px"><b>${esc(u.fullName)}</b>${roleBadge(u)}</div>
           ${u.isAdmin ? '' : `<label><span class="label">Група</span><select class="field" data-chg="userGroup" data-user="${esc(u.id)}"><option value="">Не призначено</option>${(s.groups || []).map((g) => `<option value="${esc(g.name)}" ${u.group === g.name ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>`}
@@ -1323,8 +1323,7 @@
           <div class="label">Пристрої (${u.devices})</div>
           ${u.deviceList.length ? u.deviceList.map((d) => `
             <div class="dev"><div class="dn">${esc(d.label)}${d.addedAt ? `<div class="muted small">додано ${esc(fWhen(d.addedAt))}</div>` : ''}
-              <label class="small"><span class="label">Студент</span><select class="field" data-chg="deviceStudent" data-user="${esc(u.id)}" data-key="${esc(d.key)}"><option value="">Не прив’язано</option>${(s.students || []).map((st) => `<option value="${esc(st.id)}" ${d.studentId === st.id ? 'selected' : ''}>${esc(st.fullName)}${st.group ? ' · ' + esc(st.group) : ''}</option>`).join('')}</select></label>
-              <div class="muted small">${d.studentName ? 'Рейтинг: ' + esc(d.studentName) : 'Рейтинг не призначено'}</div></div>
+              <div class="muted small">Пристрій належить обліковому запису ${esc(u.fullName)}. Рейтинг задається вище для всієї людини.</div></div>
               <button class="btn deep small" data-act="devRemove" data-user="${esc(u.id)}" data-key="${esc(d.key)}" data-name="${esc(u.fullName)}">Видалити</button></div>`).join('')
             : '<div class="muted small">Немає — перший пристрій, з якого людина увійде, стане основним.</div>'}
           <div class="btn-row">${u.devices > 1 ? `<button class="btn deep" data-act="resetDevices" data-id="${esc(u.id)}">Відв’язати всі</button>` : ''}
@@ -1940,11 +1939,6 @@
       importRating(f);
     } else if (el.dataset.chg === 'ratingPts') {
       ratingSavePts(el);
-    } else if (el.dataset.chg === 'deviceStudent') {
-      const s = sheetOf(el);
-      api('POST', `/api/admin/users/${encodeURIComponent(el.dataset.user)}/devices/${encodeURIComponent(el.dataset.key)}/student`, { studentId: el.value })
-        .then(() => { toast(el.value ? 'Студента прив’язано до пристрою' : 'Прив’язку знято'); if (s && s.reload) s.reload(); })
-        .catch((e) => { toast(e.message); if (s && s.reload) s.reload(); });
     } else if (el.dataset.chg === 'notifyField') {
       S.notify[el.dataset.key] = el.value;
     } else if (el.dataset.chg === 'hwImages' && el.files && el.files.length) {
