@@ -20,7 +20,12 @@ const DB_NAME = process.env.DB_NAME || 'navs';
 const APP_TZ = process.env.APP_TZ || 'Europe/Kyiv';
 const GRADES_DB = process.env.GRADES_DB || 'diary'; // база, де лежить колекція grades
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const MAX_DEVICES = parseInt(process.env.MAX_DEVICES, 10) || 5; // скільки пристроїв може мати одна людина
+// Ліміт пристроїв на людину: 0 (за замовчуванням) = без ліміту. Щоб повернути ліміт — задайте MAX_DEVICES=5.
+const MAX_DEVICES = Math.max(0, parseInt(process.env.MAX_DEVICES, 10) || 0);
+const deviceLimitReached = (user) => MAX_DEVICES > 0 && user.deviceIds.length >= MAX_DEVICES;
+// Підтвердження нового пристрою адміністратором: за замовчуванням вимкнено (звичайні учасники входять одразу).
+// Щоб повернути: REQUIRE_DEVICE_APPROVAL=true. Для акаунтів адміністраторів захист (пароль/підтвердження) лишається завжди.
+const REQUIRE_DEVICE_APPROVAL = process.env.REQUIRE_DEVICE_APPROVAL === 'true';
 const GOOGLE_SHEET_ID = (process.env.GOOGLE_SHEET_ID || '1grET3-MHCkBXqrBrHL1BIiUnAks0Kh3P4MuOijcPykY').trim();
 const GOOGLE_SHEET_GID = (process.env.GOOGLE_SHEET_GID || '0').trim();
 const GOOGLE_SHEET_GROUP = (process.env.GOOGLE_SHEET_GROUP || '101 СПД').trim();
@@ -653,11 +658,17 @@ route('POST', '/api/auth/login', async ({ body, ip, req }) => {
         await addDevice(user, deviceId, label);
       } else if (user.isAdmin && ADMIN_PASSWORD && !body.password && !user.pendingDevices.some((p) => p.deviceId === deviceId)) {
         throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
+      } else if (!user.isAdmin && !REQUIRE_DEVICE_APPROVAL) {
+        // Звичайний учасник: новий пристрій додається одразу, без запиту адміністратору.
+        if (deviceLimitReached(user)) {
+          throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
+        }
+        await addDevice(user, deviceId, label);
       } else {
         // Новий пристрій людини, яка вже має інші: не відмовляємо, а надсилаємо запит адміністратору.
         const already = user.pendingDevices.some((p) => p.deviceId === deviceId);
         if (!already) {
-          if (user.deviceIds.length >= MAX_DEVICES) {
+          if (deviceLimitReached(user)) {
             throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
           }
           const entry = { key: devKey(deviceId), deviceId, label, requestedAt: new Date() };
@@ -1467,7 +1478,7 @@ route('POST', '/api/admin/users/:id/devices/:key/approve', async ({ params }) =>
   normDevices(user);
   const req = user.pendingDevices.find((p) => (p.key || devKey(p.deviceId)) === params.key);
   if (!req) throw new HttpError(404, 'Запит уже оброблено.');
-  if (user.deviceIds.length >= MAX_DEVICES) {
+  if (deviceLimitReached(user)) {
     throw new HttpError(400, `Уже прив’язано максимум пристроїв (${MAX_DEVICES}). Спершу видаліть непотрібний.`);
   }
   await addDevice(user, req.deviceId, req.label || 'Пристрій');
