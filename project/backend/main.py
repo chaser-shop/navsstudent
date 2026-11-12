@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pymongo.errors import PyMongoError
 
 from .database import ensure_indexes, get_db
-from .routes import auth, imports, orders, pricing, products, settings
+from .routes import audit, auth, catalog, customers, imports, orders, pricing, products, settings, stats
 
 
 @asynccontextmanager
@@ -17,7 +17,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Back-office", lifespan=lifespan, docs_url=None, redoc_url=None)
-for r in (auth, products, pricing, imports, orders, settings):
+for r in (auth, products, catalog, pricing, imports, orders, customers, stats, audit, settings):
     app.include_router(r.router)
 
 
