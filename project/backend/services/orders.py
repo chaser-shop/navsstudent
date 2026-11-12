@@ -50,20 +50,27 @@ def create_order(db, customer: dict, items: list, admin: str) -> dict:
         total += price * qty
         lines.append({"product_id": pid, "name": p["name"], "brand": p["brand"],
                       "qty": qty, "unit_price": price, "line_total": money(price * qty)})
+    now = datetime.now(timezone.utc)
     doc = {"number": next_number(db), "customer": customer, "items": lines, "total": money(total),
            "currency": "UAH", "status": "new", "notes": [], "created_by": admin,
-           "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}
+           "history": [{"status": "new", "by": admin, "at": now}],
+           "created_at": now, "updated_at": now}
     res = db.orders.insert_one(to_db(doc))
     doc["_id"] = res.inserted_id
     return doc
 
 
-def set_status(db, number: str, status: str):
+def set_status(db, number: str, status: str, admin: str | None = None):
+    """Повертає замовлення (None - не знайдено). Історія поповнюється лише при реальній зміні."""
     if status not in STATUSES:
         raise OrderError("Невідомий статус")
-    return db.orders.find_one_and_update(
-        {"number": number}, {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}},
+    now = datetime.now(timezone.utc)
+    o = db.orders.find_one_and_update(
+        {"number": number, "status": {"$ne": status}},
+        {"$set": {"status": status, "updated_at": now},
+         "$push": {"history": {"status": status, "by": admin, "at": now}}},
         return_document=True)
+    return o or db.orders.find_one({"number": number})
 
 
 def add_note(db, number: str, text: str, admin: str):

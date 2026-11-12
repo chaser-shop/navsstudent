@@ -36,8 +36,8 @@ def preview(body: MarkupsIn, db=Depends(get_db), _=Depends(current_admin)):
     new = {**get_markups(db), **body.markups}
     try:
         ch = _diff(db, new)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    except (ValueError, ArithmeticError):      # decimal.InvalidOperation - ArithmeticError
+        raise HTTPException(422, "Націнка має бути невід'ємним числом")
     return {"affected": len(ch), "sample": [
         {"name": p["name"], "old": public(p.get("final_price")), "new": public(r["final_price"])} for p, r in ch[:20]]}
 
@@ -45,9 +45,11 @@ def preview(body: MarkupsIn, db=Depends(get_db), _=Depends(current_admin)):
 @router.put("/markups")
 def apply(body: MarkupsIn, db=Depends(get_db), admin=Depends(current_admin)):
     new = {**get_markups(db), **body.markups}
-    for v in new.values():
-        if D(v) < 0:
+    try:
+        if any(D(v) < 0 for v in new.values()):
             raise HTTPException(422, "Націнка не може бути від'ємною")
+    except ArithmeticError:
+        raise HTTPException(422, "Націнка має бути невід'ємним числом")
     ch = _diff(db, new)
     now = datetime.now(timezone.utc)
     if ch:

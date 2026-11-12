@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pymongo.errors import PyMongoError
 
 from .database import ensure_indexes, get_db
-from .routes import auth, imports, orders, pricing, products, settings
+from .routes import audit, auth, catalog, customers, imports, orders, pricing, products, settings, stats
 
 
 @asynccontextmanager
@@ -17,7 +17,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Back-office", lifespan=lifespan, docs_url=None, redoc_url=None)
-for r in (auth, products, pricing, imports, orders, settings):
+for r in (auth, products, catalog, pricing, imports, orders, customers, stats, audit, settings):
     app.include_router(r.router)
 
 
@@ -40,4 +40,19 @@ def root():
     return RedirectResponse("/admin/")
 
 
-app.mount("/admin", StaticFiles(directory=Path(__file__).resolve().parent.parent / "frontend" / "admin", html=True))
+class AdminStatic(StaticFiles):
+    """Статика адмінки: завжди ревалідація (модулі без хешів у назвах) і захисні заголовки."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Referrer-Policy"] = "same-origin"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; "
+            "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        return resp
+
+
+app.mount("/admin", AdminStatic(directory=Path(__file__).resolve().parent.parent / "frontend" / "admin", html=True))

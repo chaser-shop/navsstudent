@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import VerificationError, VerifyMismatchError
 from fastapi import Depends, HTTPException, Request
 
 from ..config import settings
@@ -17,6 +17,13 @@ def hash_password(p: str) -> str:
     if len(p) < 10:
         raise ValueError("Пароль має містити щонайменше 10 символів")
     return _ph.hash(p)
+
+
+def verify_password(password_hash: str, password: str) -> bool:
+    try:
+        return _ph.verify(password_hash, password)
+    except (VerificationError, ValueError):
+        return False
 
 
 def authenticate(db, username: str, password: str) -> str:
