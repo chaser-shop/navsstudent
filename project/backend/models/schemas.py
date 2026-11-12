@@ -26,10 +26,28 @@ class ProductIn(BaseModel):
 
 class ProductPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
+    brand: str | None = Field(None, min_length=1, max_length=80)
     category: Category | None = None
+    product_line: str | None = Field(None, max_length=200)
+    model: str | None = Field(None, max_length=120)
+    variant: str | None = Field(None, max_length=120)
+    volume_ml: float | None = Field(None, ge=0)
+    nicotine_mg: float | None = Field(None, ge=0)
     purchase_price: str | None = Field(None, pattern=r"^\d{1,7}(\.\d{1,2})?$")
     status: Literal["in_stock", "expected", "unavailable"] | None = None
-    images: list[str] | None = None
+    images: list[str] | None = Field(None, max_length=12)
+
+
+class LinePatch(BaseModel):
+    brand: str = Field(min_length=1, max_length=80)
+    line: str = Field(min_length=1, max_length=200)
+    new_line: str | None = Field(None, max_length=200)
+    images: list[str] | None = Field(None, max_length=6)
+
+
+class PasswordIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
 
 
 class MarkupsIn(BaseModel):
