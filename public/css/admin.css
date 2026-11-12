@@ -1,0 +1,152 @@
+/* Стилі панелі адміністратора (доповнюють css/app.css). Усі власні класи починаються з ad-. */
+
+/* ---------- Показники ---------- */
+.ad-kpis .kpi-label svg { color: var(--accent); }
+.ad-kpis .kpi-sub { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.35; }
+.ad-kpis .kpi-sub a { color: inherit; font-weight: 550; }
+.ad-kpis .kpi-sub a:hover { color: var(--accent); }
+.ad-of { font-size: .5em; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+.ad-kpi-note { display: block; font-size: 16px; font-weight: 650; line-height: 1.3; letter-spacing: 0; white-space: normal; color: var(--text-2); }
+.ad-spark { margin-top: 2px; color: var(--accent); }
+@media (min-width: 720px) { .ad-kpis-tall .kpi-label { align-items: flex-start; min-height: 39px; } }
+.ad-kpis-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 720px) { .ad-kpis-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+/* ---------- Стан і повідомлення ---------- */
+.ad-alert { text-decoration: none !important; transition: border-color var(--t-fast), transform var(--t-fast); }
+.ad-alert:hover { border-color: var(--border-strong); }
+.ad-alert > svg:last-child { margin-top: 3px; opacity: .55; }
+.ad-status { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px 3px 8px; border-radius: var(--r-full); font-size: 12.5px; font-weight: 650; background: var(--surface-3); color: var(--text-2); }
+.ad-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.ad-status.ok { background: var(--success-soft); color: var(--success); }
+.ad-status.ok .ad-dot { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+.ad-status.error { background: var(--danger-soft); color: var(--danger); }
+.ad-status.error .ad-dot { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+.ad-status.wait { background: var(--warning-soft); color: var(--warning); }
+.ad-status.wait .ad-dot { background: var(--warning); }
+
+/* ---------- Каркас сторінок ---------- */
+/* Колонки сітки не мають розпирати екран довгим вмістом (на 360 px це давало горизонтальну прокрутку). */
+.ad-fit > *, .ad-kpis > * { min-width: 0; }
+.ad-fit .insight p { min-width: 0; overflow-wrap: anywhere; }
+
+/* ---------- Картка синхронізації ---------- */
+.ad-sync-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3) var(--s4); }
+.ad-sync-title { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ad-sync-title h2 { font-size: 20px; }
+.ad-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); gap: var(--s4) var(--s5); margin: var(--s5) 0 0; padding-top: var(--s4); border-top: 1px solid var(--border); }
+.ad-facts > div { min-width: 0; }
+.ad-facts dt { font-size: 12.5px; font-weight: 600; color: var(--muted); margin-bottom: 3px; }
+.ad-facts dd { margin: 0; font-size: 15px; font-weight: 620; overflow-wrap: anywhere; }
+.ad-facts dd small { display: block; margin-top: 1px; font-size: 12.5px; font-weight: 450; color: var(--muted); }
+.ad-facts dd a svg { display: inline; width: 14px; height: 14px; vertical-align: -2px; }
+.ad-rules { list-style: none; margin: 0; padding: var(--s4) var(--s5) var(--s5); display: grid; gap: var(--s3); font-size: 14px; color: var(--text-2); }
+.ad-rules li { position: relative; padding-left: 20px; line-height: 1.5; }
+.ad-rules li::before { content: ""; position: absolute; left: 2px; top: .6em; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.ad-rules strong { color: var(--text); font-weight: 650; }
+.ad-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.ad-notes { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+
+/* ---------- Фільтри ---------- */
+.ad-filterbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s4) var(--s5); }
+.ad-filterbar > .field { min-width: 0; }
+.ad-filterbar > .field + .field { margin-top: 0; }
+.ad-filterbar .segmented { max-width: 100%; }
+.ad-body { margin-top: var(--s5); transition: opacity var(--t-fast); }
+.ad-dim { opacity: .5; pointer-events: none; }
+@media (max-width: 599px) {
+  .ad-filterbar > .field { width: 100%; }
+  .ad-filterbar .segmented { display: flex; width: 100%; }
+  .ad-filterbar .segmented button { flex: 1 1 auto; padding: 6px; }
+}
+@media (min-width: 600px) { .ad-filterbar > .field:first-child { width: 240px; } }
+
+/* ---------- Таблиці ---------- */
+.ad-table .ad-cell { display: block; min-width: 0; }
+.ad-table .ad-sub { display: block; color: var(--muted); font-size: 12.5px; font-weight: 450; }
+.ad-table td.primary a { color: var(--text); font-weight: 600; }
+.ad-table td.primary a:hover { color: var(--accent); }
+.ad-table .ad-cell > .badge + .badge { margin-left: 4px; }
+@media (max-width: 719px) {
+  .table.ad-table.responsive tr { display: flex; flex-direction: column; }
+  .table.ad-table.responsive td.primary { order: -1; }
+  .table.ad-table.responsive td .ad-cell { text-align: right; }
+  .table.ad-table.responsive td.primary .ad-cell { text-align: left; }
+}
+
+/* ---------- Студенти ---------- */
+.ad-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s3); align-items: end; }
+.ad-filters > .field { min-width: 0; }
+.ad-filters > .field + .field { margin-top: 0; }
+.ad-filters .ad-f-search { grid-column: 1 / -1; }
+@media (min-width: 600px) { .ad-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 1240px) {
+  .ad-filters { grid-template-columns: minmax(0, 1.6fr) repeat(4, minmax(0, 1fr)); }
+  .ad-filters .ad-f-search { grid-column: auto; }
+}
+.ad-filters-changes .ad-f-search, .ad-filters-changes > .field:nth-child(2) { grid-column: 1 / -1; }
+.ad-filters .segmented { align-self: flex-start; }
+.ad-filters-changes .segmented { flex-wrap: wrap; max-width: 100%; }
+@media (max-width: 599px) { .ad-filters-changes .segmented { display: flex; } .ad-filters-changes .segmented button { flex: 1 1 auto; } }
+@media (min-width: 600px) {
+  .ad-filters-changes { grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)); }
+  .ad-filters-changes > .field:nth-child(2) { grid-column: auto; }
+}
+/* Таблиця студентів на середніх екранах: група переходить під ПІБ, відступи тісніші, щоб обійтися без прокрутки. */
+.ad-table .ad-group-inline { display: none; }
+@media (min-width: 720px) and (max-width: 1359px) {
+  .ad-students th, .ad-students td { padding-left: 10px; padding-right: 10px; }
+  .ad-students th { white-space: normal; }
+  .ad-students .ad-col-group { display: none; }
+  .ad-students .ad-group-inline { display: block; }
+}
+.ad-line { display: block; }
+.ad-table tr.ad-reverted .ad-cell { opacity: .6; }
+.ad-table tr.ad-reverted td:last-child .ad-cell { opacity: 1; }
+.ad-table tr.ad-reverted .num.strong { text-decoration: line-through; }
+.ad-rank { color: var(--muted); font-weight: 700; width: 1%; white-space: nowrap; }
+.ad-anchor { scroll-margin-top: 72px; }
+.ad-link-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s2); }
+.ad-link-row .btn { height: auto; min-height: 32px; padding: 6px 12px; white-space: normal; text-align: left; line-height: 1.3; }
+.ad-link-row .select { flex: 1 1 220px; width: auto; min-width: 0; }
+.ad-unlinked { align-items: flex-start; }
+@media (max-width: 719px) { .table.ad-table.responsive td.ad-rank { width: 100%; } }
+
+/* ---------- Профіль студента ---------- */
+.ad-name { display: inline-flex; align-items: center; gap: var(--s3); min-width: 0; }
+.ad-name > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.ad-sub-line .badge { margin-left: 6px; vertical-align: 1px; }
+.ad-wrap { flex-wrap: wrap; }
+.ad-conflict { align-items: flex-start; flex-wrap: wrap; }
+.ad-conflict .btn-row { margin-left: auto; }
+.ad-account { align-items: flex-start; }
+.ad-account .title { white-space: normal; overflow-wrap: anywhere; }
+.ad-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.ad-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: var(--s3); }
+.ad-tile { padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); min-width: 0; }
+.ad-tile-name { margin-bottom: 4px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.ad-tile-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; font-size: 15px; }
+.ad-tile-sub { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.ad-edit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr)); gap: var(--s3) var(--s4); }
+.ad-edit-grid > .field + .field { margin-top: 0; }
+@media (max-width: 719px) { .table.ad-table.responsive td.ad-empty { display: none; } }
+
+/* ---------- Графіки ---------- */
+.ad-chart { width: 100%; min-width: 0; }
+.ad-chart .chart-empty { min-height: 160px; }
+.ad-cb > .legend { justify-content: center; }
+.ad-hbars .hbars { gap: var(--s4); }
+@media (max-width: 599px) {
+  .ad-hbars .hbar { grid-template-columns: minmax(0, 1fr) auto; row-gap: 5px; }
+  .ad-hbars .hbar .hb-label { grid-column: 1 / -1; white-space: normal; line-height: 1.3; }
+}
+
+/* ---------- Хронологія змін ---------- */
+.ad-tl .tl-main { overflow-wrap: anywhere; }
+.ad-tl .tl-title a { color: var(--text); }
+.ad-tl .tl-title a:hover { color: var(--accent); }
+.ad-change-sub { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 3px; min-height: 20px; }
+.ad-pct { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ad-note { color: var(--muted); }
+.ad-reverted .vals, .ad-reverted .tl-title { text-decoration: line-through; color: var(--muted); }
+.ad-tag { display: inline-block; padding: 1px 7px; border-radius: var(--r-full); background: var(--surface-3); color: var(--muted); font-size: 11.5px; font-weight: 600; vertical-align: 1px; }
