@@ -1,6 +1,8 @@
 """Налаштування з .env / змінних середовища. Секрети в коді не зберігаються."""
 import os
+from datetime import timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,6 +44,14 @@ class _Settings:
     @property
     def images_dir(self) -> Path:
         return Path(os.environ.get("IMAGES_DIR", str(ROOT / "imports" / "images")))
+
+    @property
+    def timezone(self):
+        """Часовий пояс календарних днів магазину (фільтри дат, графіки)."""
+        try:
+            return ZoneInfo(os.environ.get("TIMEZONE", "Europe/Kyiv"))
+        except Exception:      # немає бази часових поясів (напр. Windows без tzdata)
+            return timezone.utc
 
 
 settings = _Settings()
