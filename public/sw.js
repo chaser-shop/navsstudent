@@ -1,9 +1,15 @@
 /* Service worker: офлайн-оболонка + Web Push сповіщення. */
-const CACHE = 'diary-shell-v11';
-const SHELL = ['/', '/style.css', '/app.js', '/schedule.js', '/rating.js', '/device.js', '/theme.js', '/manifest.webmanifest', '/icons/icon-192.png'];
+const CACHE = 'diary-shell-v12';
+const SHELL = [
+  '/', '/css/app.css', '/css/study.css', '/css/admin.css', '/css/manage.css', '/js/main.js',
+  '/schedule.js', '/rating.js', '/device.js', '/theme.js', '/manifest.webmanifest', '/icons/icon-192.png',
+];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // Окремі запити: один відсутній файл не зриває встановлення всієї оболонки.
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => Promise.allSettled(SHELL.map((url) => c.add(url))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -20,13 +26,14 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== location.origin || url.pathname.startsWith('/api/') || url.pathname === '/healthz') return;
+  const isPage = req.mode === 'navigate';
   e.respondWith(
     fetch(req)
       .then((res) => {
-        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
+        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(isPage ? '/' : req, copy)); }
         return res;
       })
-      .catch(() => caches.match(req).then((hit) => hit || caches.match('/')))
+      .catch(() => caches.match(isPage ? '/' : req).then((hit) => hit || caches.match('/')))
   );
 });
 
