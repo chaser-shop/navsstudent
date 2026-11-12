@@ -294,6 +294,20 @@ test('щоденні повідомлення про прогрес будуют
   assert.match(fresh.data.insights[0].text, /недостатньо історичних даних/);
 });
 
+test('журнал змін: посторінковий перегляд не губить записи з однаковим часом', async () => {
+  const total = await db.collection('ratingHistory').countDocuments({ source: 'sheet', kind: 'score' });
+  const seen = new Set();
+  let before = '';
+  for (let guard = 0; guard < 50; guard++) {
+    const r = await adminApi('GET', `/api/admin/score-changes?source=sheet&limit=4${before ? `&before=${encodeURIComponent(before)}` : ''}`);
+    assert.equal(r.status, 200);
+    r.data.items.forEach((i) => seen.add(i.id));
+    if (!r.data.more) break;
+    before = r.data.next;
+  }
+  assert.equal(seen.size, total);
+});
+
 test('адміністратор бачить і скасовує зміну студента', async () => {
   const list = await adminApi('GET', '/api/admin/score-changes?source=student');
   const change = list.data.items.find((i) => i.ratingId === ids.recB);

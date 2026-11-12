@@ -41,13 +41,29 @@ function intTicks(min, max) {
   if (ticks[ticks.length - 1] !== hi) ticks.push(hi);
   return { lo, hi, ticks };
 }
+// Підписи осі X з рівним кроком, без сусідніх підписів (останній — лише якщо не налазить на попередній).
 const labelIndexes = (n, max = 6) => {
   if (n <= max) return new Set(Array.from({ length: n }, (_, i) => i));
-  const out = new Set([0, n - 1]);
-  const step = (n - 1) / (max - 1);
-  for (let k = 1; k < max - 1; k++) out.add(Math.round(k * step));
+  const step = Math.ceil((n - 1) / (max - 1));
+  const out = new Set();
+  let last = 0;
+  for (let i = 0; i < n; i += step) { out.add(i); last = i; }
+  if (last !== n - 1) {
+    if (n - 1 - last < step / 2) out.delete(last);
+    out.add(n - 1);
+  }
   return out;
 };
+// Цілі «круглі» поділки від нуля для лічильників (кількість змін, студентів): крок 1, 2, 5 × 10ⁿ.
+function countTicks(max) {
+  const raw = Math.max(1, max / 4);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const n = raw / mag;
+  const step = Math.max(1, Math.round((n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag));
+  const ticks = [];
+  for (let v = 0; v < max + step; v += step) ticks.push(v);
+  return { lo: 0, hi: ticks[ticks.length - 1], ticks };
+}
 
 /**
  * lineChart({ labels, tipLabels?, series: [{ label, color, values, dashed?, area? }], height?, format?, invert?, integer?, min?, max?, empty? })
@@ -114,10 +130,11 @@ export function lineChart({ labels, tipLabels, series, height = 240, format = fm
   </div>`;
 }
 
-/** barChart({ labels, tipLabels?, series: [{ label, color, values }], stacked?, height?, format? }) */
-export function barChart({ labels, tipLabels, series, stacked = false, height = 220, format = fmtNum, empty = 'Поки що немає даних.', width, ariaLabel = 'Діаграма' }) {
+/** barChart({ labels, tipLabels?, series: [{ label, color, values }], stacked?, integer?, height?, format? }) */
+export function barChart({ labels, tipLabels, series, stacked = false, integer, height = 220, format = fmtNum, empty = 'Поки що немає даних.', width, ariaLabel = 'Діаграма' }) {
   const totals = labels.map((_, i) => (stacked ? series.reduce((a, s) => a + (s.values[i] || 0), 0) : Math.max(0, ...series.map((s) => s.values[i] || 0))));
   if (!totals.some((v) => v > 0)) return html`<div class="chart-empty">${empty}</div>`;
+  const whole = integer != null ? integer : series.every((s) => s.values.every((v) => v == null || Number.isInteger(v)));
   const W = viewWidth(width);
   const H = height;
   const pl = 38;
@@ -126,7 +143,7 @@ export function barChart({ labels, tipLabels, series, stacked = false, height = 
   const pb = 28;
   const iw = W - pl - pr;
   const ih = H - pt - pb;
-  const scale = niceTicks(0, Math.max(...totals), 4);
+  const scale = whole ? countTicks(Math.max(...totals)) : niceTicks(0, Math.max(...totals), 4);
   const y = (v) => pt + ih - (v / (scale.hi || 1)) * ih;
   const n = labels.length;
   const slot = iw / n;

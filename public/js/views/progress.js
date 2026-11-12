@@ -229,9 +229,13 @@ export function bucketLabels(series, unit) {
 async function statsTab(ctx, host) {
   const period = PERIODS.some(([k]) => k === ctx.query.get('period')) ? ctx.query.get('period') : '30';
   const unit = UNITS.some(([k]) => k === ctx.query.get('unit')) ? ctx.query.get('unit') : 'day';
-  const [ov, st] = await Promise.all([api('GET', '/api/me/overview'), api('GET', `/api/me/stats?period=${period}&unit=${unit}`)]);
+  const statsReq = api('GET', `/api/me/stats?period=${period}&unit=${unit}`);
+  statsReq.catch(() => {}); // для неприв’язаного акаунта сервер відповідає 404 — показуємо пояснення нижче
+  const ov = await api('GET', '/api/me/overview');
   if (!ctx.isActive()) return;
   if (!ov.linked) { setHTML(host, notLinked()); return; }
+  const st = await statsReq;
+  if (!ctx.isActive()) return;
   const go = (p, u) => ctx.navigate(`/progress/stats?period=${p}&unit=${u}`, { replace: true });
   const { labels, tips } = bucketLabels(st.series, st.unit);
   const subjects = st.comparison.filter((c) => c.mine != null || c.avg != null);

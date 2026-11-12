@@ -288,6 +288,7 @@ svg.inline-ic, svg.sync-ic { display: inline-block; width: 1em; height: 1em; ver
 /* ---------- Форми ---------- */
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field + .field, .field + .field-row, .field-row + .field { margin-top: var(--s4); }
+.field-row > .field + .field, .stack > .field + .field, .stack > .field + .field-row, .stack > .field-row + .field { margin-top: 0; }
 .field-row { display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
 .label { font-size: 13px; font-weight: 600; color: var(--text-2); }
 .help { font-size: 12.5px; color: var(--muted); }
@@ -711,7 +712,9 @@ button.lesson:hover { background: var(--surface-2); }
 .drop { display: flex; flex-direction: column; align-items: center; gap: var(--s2); padding: var(--s6); border: 1.5px dashed var(--border-strong); border-radius: var(--r-lg); text-align: center; color: var(--muted); cursor: pointer; transition: border-color var(--t-fast), background var(--t-fast); }
 .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-softer); color: var(--text); }
 .drop svg { width: 26px; height: 26px; }
-.drop input { display: none; }
+.drop { position: relative; }
+.drop input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.drop:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
 
 /* ---------- Утиліти ---------- */
 .muted { color: var(--muted); }
@@ -746,3 +749,8 @@ button.lesson:hover { background: var(--surface-2); }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 @media print { .sidebar, .topbar, .tabbar, .fab, .toasts { display: none !important; } .content { padding: 0; } }
+/* Поки відкрито діалог (на телефоні — нижній аркуш), сповіщення показуємо згори, щоб не закривати кнопки. */
+body:has(.modal-backdrop) .toasts { top: calc(var(--sat) + 12px); bottom: auto; }
+/* Розділи керування на телефоні й планшеті (у каркасі, над вмістом сторінки). */
+.shell-subnav { margin: 0; padding: 12px var(--s4) 2px; }
+.shell-subnav a .count { margin-left: 4px; min-width: 18px; height: 18px; font-size: 11px; }
