@@ -79,6 +79,7 @@ function renderShell() {
     <aside class="sidebar" aria-label="Головне меню"></aside>
     <div class="main">
       <header class="topbar"></header>
+      <nav class="subnav mobile-only shell-subnav" id="adminNav" aria-label="Розділи керування" hidden></nav>
       <main id="content" class="content" tabindex="-1"></main>
     </div>
     <nav class="tabbar" aria-label="Розділи"></nav>
@@ -141,6 +142,21 @@ function updateChrome(path, route) {
       ${icon(t.icon)}<span>${t.label}</span>${n ? html`<span class="dot" aria-label="Є нові"></span>` : ''}
     </a>`;
   }));
+
+  // На телефоні й планшеті бічного меню немає — розділи керування показуємо смугою над сторінкою.
+  const adminNav = $('#adminNav', app);
+  if (adminNav) {
+    const show = path.startsWith('/admin') && admin.length > 1;
+    adminNav.hidden = !show;
+    if (show) {
+      setHTML(adminNav, admin.map((i) => {
+        const n = i.badge ? i.badge() : 0;
+        return html`<a href="${i.href}" class="${isActive(i, path) ? 'active' : ''}" ${isActive(i, path) ? html`aria-current="page"` : ''}>${i.label}${n ? html`<span class="count">${n}</span>` : ''}</a>`;
+      }));
+      const active = adminNav.querySelector('a.active');
+      if (active) adminNav.scrollLeft = Math.max(0, active.offsetLeft - 16);
+    }
+  }
 }
 
 function setTitle(title) {
@@ -193,7 +209,7 @@ async function renderRoute({ scroll = true } = {}) {
   try {
     const mod = await route.view();
     if (!ctx.isActive()) return;
-    root.innerHTML = '';
+    // Індикатор лишається, доки сторінка не відмалює себе (setHTML замінює його вмістом).
     await mod.default(ctx);
   } catch (e) {
     if (!ctx.isActive()) return;
@@ -232,6 +248,8 @@ const LEGACY_TABS = {
 function processDeepLink(href, { fromPush = false } = {}) {
   const url = new URL(href, location.origin);
   const q = url.searchParams;
+  // Старі адреси зі сповіщень мають вигляд «/?tab=…», «/?lesson=…» — лише на головному шляху.
+  if (url.pathname !== '/') return fromPush ? navigate(url.pathname + url.search) : renderRoute();
   if (q.has('lesson')) return navigate(`/schedule?lesson=${encodeURIComponent(q.get('lesson'))}${q.get('join') ? '&join=1' : ''}`, { replace: !fromPush });
   if (q.has('homework')) return navigate(`/homework?lesson=${encodeURIComponent(q.get('homework'))}&new=1`, { replace: !fromPush });
   if (q.has('answered')) {
@@ -263,10 +281,15 @@ async function startApp() {
     started = true;
     startTimers();
     processDeepLink(location.href);
+    // Якщо сповіщення вже дозволено, прив’язуємо підписку цього пристрою до поточного акаунта.
+    import('./views/profile.js').then((m) => m.ensurePushBinding && m.ensurePushBinding()).catch(() => {});
   } else {
     renderRoute({ scroll: false });
   }
 }
+
+// Подія «встановити застосунок» приходить один раз — зберігаємо її для сторінки профілю.
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); window.__installPrompt = e; });
 
 async function showLogin(message) {
   started = false;

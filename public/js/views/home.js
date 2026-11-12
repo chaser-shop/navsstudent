@@ -1,6 +1,6 @@
 // Головна: привітання, підсумок балів, щоденний прогрес, пари на сьогодні, «Що задали?», найближче домашнє.
 
-import { api } from '../core/api.js';
+import { api, LS } from '../core/api.js';
 import { html, setHTML, $, actions, busy } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { store, on, subjectName, subjectLink, isDone, isAnswered, markAnswered, canModerate, sync } from '../core/store.js';
@@ -14,6 +14,8 @@ const greeting = () => {
   return h < 5 ? 'Доброї ночі' : h < 12 ? 'Доброго ранку' : h < 18 ? 'Доброго дня' : 'Доброго вечора';
 };
 const firstName = (full) => String(full || '').trim().split(/\s+/)[1] || '';
+// Пропозиція ввімкнути сповіщення: лише якщо браузер їх підтримує і людина ще не відповідала.
+const pushAsk = () => 'Notification' in window && 'PushManager' in window && 'serviceWorker' in navigator && Notification.permission === 'default' && !LS.get('pushAskOff');
 const capitalize = (s) => (s ? s[0].toLocaleUpperCase('uk') + s.slice(1) : s);
 // На головній — найважливіші повідомлення: місце, загальний бал, рекорд тижня, далі найбільші зміни предметів.
 const PRIORITY = { rank: 0, total: 1, best: 2, subject: 3, steady: 4, info: 5 };
@@ -99,6 +101,16 @@ export default async function home(ctx) {
           </section>
         </div>
         <div class="stack lg">
+          ${pushAsk() ? html`<section class="card card-pad">
+            <div class="flex start">
+              <span style="display:grid;place-items:center;width:40px;height:40px;border-radius:12px;background:var(--accent-soft);color:var(--accent);flex:none">${icon('bell')}</span>
+              <div class="grow">
+                <h2 style="font-size:16px">Увімкніть сповіщення</h2>
+                <p class="small muted mt1">Нагадаємо про початок пари, нове домашнє й надішлемо щоденний підсумок прогресу.</p>
+                <div class="btn-row mt3"><a class="btn btn-primary btn-sm" href="/profile">Увімкнути</a><button type="button" class="btn btn-ghost btn-sm" data-action="pushLater">Не зараз</button></div>
+              </div>
+            </div>
+          </section>` : ''}
           ${asks.length ? html`<section class="card">
             <div class="card-head"><h2>Що задали?</h2><span class="hint">пари, що вже закінчилися</span></div>
             <div class="list">${asks.map((l) => html`<div class="list-item">
@@ -165,6 +177,7 @@ export default async function home(ctx) {
     if (ctx.isActive()) render(overview);
   };
   ctx.onCleanup(actions(ctx.root, {
+    pushLater: () => { LS.set('pushAskOff', true); render(overview); },
     noHomework: (el) => busy(el, async () => {
       const id = el.dataset.id;
       try {
