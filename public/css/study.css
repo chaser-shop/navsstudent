@@ -1,0 +1,162 @@
+/* Стилі розділів «Розклад», «Домашнє», «Профіль», «Модерація», «Розклад і предмети» (доповнюють css/app.css).
+   Усі власні класи мають префікс st-; правила для спільних компонентів обмежені контейнером .st-page. */
+
+.st-page.has-fab { padding-bottom: 72px; }
+@media (min-width: 1024px) { .st-page.has-fab { padding-bottom: 0; } }
+
+/* ---------- Спільне ---------- */
+.st-dot { display: inline-block; flex: none; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--lc, var(--accent)); vertical-align: 1px; }
+.st-bar { align-self: stretch; flex: none; width: 3px; border-radius: 2px; background: var(--lc, var(--accent)); }
+.st-hwtext { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); font-size: 14px; }
+.st-thumb-btn { display: block; padding: 0; border: 0; border-radius: var(--r-sm); background: none; line-height: 0; cursor: zoom-in; }
+.st-thumb-btn.is-broken { position: relative; width: 72px; height: 72px; border: 1.5px dashed var(--border-strong); cursor: default; }
+.st-thumb-btn.is-broken .thumb { visibility: hidden; }
+.st-links { margin-top: var(--s2); }
+.st-links .chip { max-width: 100%; }
+.st-links .chip .ellipsis { min-width: 0; }
+
+/* ---------- Розклад ---------- */
+.st-weekbar { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s4); }
+.st-weekinfo { min-width: 0; }
+.st-weekinfo strong { display: block; font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.st-weekinfo span { font-size: 13px; color: var(--muted); }
+.st-weeknav { display: flex; align-items: center; flex: none; gap: 2px; }
+.st-weeknav .btn { margin-right: var(--s2); }
+.st-weeknav .segmented { margin-right: var(--s3); }
+.st-weeknav .icon-btn { width: 36px; height: 36px; }
+
+.st-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-bottom: var(--s6); }
+.st-day {
+  display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 0; padding: 8px 0 7px;
+  border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); color: var(--text-2);
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast), transform var(--t-fast);
+}
+.st-day:hover { border-color: var(--border-strong); }
+.st-day:active { transform: scale(.97); }
+.st-day-w { font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.st-day-n { font-size: 18px; font-weight: 700; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.st-dots { display: flex; align-items: center; justify-content: center; gap: 3px; height: 7px; }
+.st-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--lc, var(--accent)); }
+.st-day.is-empty { border-style: dashed; background: transparent; color: var(--faint); }
+.st-day.is-empty .st-day-w { color: var(--faint); }
+.st-day.is-today { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.st-day.is-today .st-day-w, .st-day.is-today .st-day-n { color: var(--accent); }
+.st-day.is-selected { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--accent) 80%, transparent); }
+.st-day.is-selected .st-day-w { color: color-mix(in srgb, var(--on-accent) 75%, transparent); }
+.st-day.is-selected .st-day-n { color: var(--on-accent); }
+.st-day.is-selected .st-dots i { background: var(--on-accent); opacity: .75; }
+@media (min-width: 600px) { .st-days { gap: var(--s2); } .st-day { padding: 10px 0 9px; } .st-day-n { font-size: 20px; } }
+
+.st-rows { overflow: hidden; }
+.st-lesson .time > span { display: block; }
+.st-lesson .subj { overflow-wrap: anywhere; }
+.st-lesson-side { display: flex; flex: none; flex-direction: column; align-items: flex-end; justify-content: center; gap: 6px; }
+.st-weekgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr)); gap: var(--s4); align-items: start; }
+.st-daycard { overflow: hidden; }
+.st-daycard.is-today { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.st-free { margin-top: var(--s4); }
+
+/* Вікно пари */
+.st-join { margin-top: var(--s1); }
+.st-sec h3 { margin-bottom: var(--s2); font-size: 14px; }
+.st-hwlist { display: flex; flex-direction: column; gap: 10px; }
+.st-hwmini { padding: 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); }
+.st-hwmini .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: var(--s2); color: var(--muted); font-size: 12.5px; }
+.st-hwmini .meta span { display: inline-flex; align-items: center; gap: 5px; }
+.st-hwmini .meta svg { width: 13px; height: 13px; }
+.st-hwmini .st-links { margin-top: var(--s2); }
+.st-hwmini .thumbs { margin-top: var(--s2); }
+
+/* ---------- Домашнє ---------- */
+.st-filter { display: flex; gap: var(--s2); margin: 0 calc(-1 * var(--s4)) var(--s5); padding: 2px var(--s4) 4px; overflow-x: auto; scrollbar-width: none; }
+.st-filter::-webkit-scrollbar { display: none; }
+.st-filter .chip { flex: none; max-width: 240px; }
+@media (min-width: 1024px) { .st-filter { flex-wrap: wrap; margin-left: 0; margin-right: 0; padding-left: 0; padding-right: 0; overflow: visible; } }
+
+.st-page .hw .subj { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.st-page .hw .subj .st-dot { margin-right: 0; }
+.st-page .hw .meta span { display: inline-flex; align-items: center; gap: 5px; }
+.st-page .hw .meta svg { width: 13px; height: 13px; }
+.st-page .hw .check input { margin: 0; display: block; }
+.st-state { display: grid; place-items: center; width: 20px; height: 20px; }
+.st-state svg { width: 20px; height: 20px; }
+.st-state.pending { color: var(--warning); }
+.st-state.rejected { color: var(--danger); }
+.st-hw-actions { display: flex; flex: none; flex-direction: column; align-self: flex-start; gap: 2px; margin: -4px -8px 0 0; }
+.st-hw-actions .icon-btn { color: var(--muted); }
+.st-hw-actions .icon-btn:hover { color: var(--text); }
+@media (min-width: 600px) { .st-hw-actions { flex-direction: row; } }
+
+/* Редактор завдання */
+.st-form { display: flex; flex-direction: column; gap: var(--s4); }
+.st-form .field + .field { margin-top: 0; }
+.st-context { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--accent-softer); color: var(--text-2); font-size: 13.5px; }
+.st-context svg { flex: none; width: 16px; height: 16px; margin-top: 2px; color: var(--accent); }
+.st-modes { display: flex; flex-wrap: wrap; overflow: visible; align-self: flex-start; max-width: 100%; }
+.st-modes button { white-space: normal; text-align: left; }
+.st-date.is-locked { opacity: .7; pointer-events: none; }
+.st-attlist { display: flex; flex-direction: column; gap: 6px; }
+.st-attlist:empty { display: none; }
+.st-att { display: flex; align-items: center; gap: var(--s2); padding: 3px 4px 3px 10px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); }
+.st-att a { display: flex; flex: 1; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; }
+.st-att a svg { flex: none; width: 15px; height: 15px; }
+.st-add { display: flex; gap: var(--s2); }
+.st-add .input { flex: 1; min-width: 0; }
+.st-thumbs { display: flex; flex-wrap: wrap; gap: 10px; }
+.st-thumb { position: relative; width: 72px; height: 72px; }
+.st-thumb .thumb { display: block; }
+.st-thumb-x {
+  position: absolute; top: -7px; right: -7px; display: grid; place-items: center; width: 24px; height: 24px; padding: 0;
+  border: 2px solid var(--bg-elev); border-radius: 50%; background: var(--text); color: var(--bg);
+}
+.st-thumb-x svg { width: 12px; height: 12px; }
+.st-uploading { display: grid; place-items: center; border: 1.5px dashed var(--border-strong); border-radius: var(--r-sm); color: var(--muted); }
+.st-aux { padding-top: var(--s3); border-top: 1px dashed var(--border); }
+
+/* ---------- Модерація ---------- */
+.st-modcard .st-hwtext { margin-top: var(--s2); }
+.st-modcard .thumbs { margin-top: var(--s2); }
+.st-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: var(--s3); color: var(--muted); font-size: 12.5px; }
+.st-meta span { display: inline-flex; align-items: center; gap: 5px; }
+.st-meta svg { width: 13px; height: 13px; }
+.st-modcard .card-foot { display: grid; grid-template-columns: 1fr 1fr auto; align-items: center; gap: var(--s2); background: var(--surface-2); border-radius: 0 0 var(--r-lg) var(--r-lg); }
+.st-modcard .card-foot .btn { width: 100%; }
+.st-edit-btn { color: var(--muted); }
+.st-edit-btn:hover { color: var(--text); }
+@media (min-width: 720px) { .st-modcard .card-foot { grid-template-columns: auto auto 1fr; } .st-modcard .card-foot .btn { width: auto; } .st-edit-btn { justify-self: end; } }
+.st-modrow { flex-wrap: wrap; gap: var(--s2) var(--s3); }
+.st-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+@media (max-width: 599px) { .st-modrow .st-actions { width: 100%; } .st-modrow .st-actions .btn { flex: 1; } }
+
+/* ---------- Розклад і предмети (адміністрування) ---------- */
+.st-editlist { overflow: hidden; }
+.st-edit { padding: var(--s4) var(--s5); border-top: 1px solid var(--border); }
+.st-edit:first-child { border-top: 0; }
+.st-edit-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin-bottom: var(--s3); }
+.st-edit-head strong { overflow-wrap: anywhere; }
+.st-edit-foot { display: flex; align-items: center; justify-content: flex-end; gap: var(--s3); margin-top: var(--s3); }
+.st-msg { flex: 1; min-height: 1.2em; }
+.st-status { display: flex; align-items: center; gap: var(--s2); color: var(--muted); font-size: 14px; }
+.st-status svg { flex: none; width: 18px; height: 18px; }
+.st-status.ok { color: var(--success); }
+.st-status.err { color: var(--danger); }
+@media (max-width: 599px) { .st-edit { padding: var(--s3) var(--s4); } }
+
+/* ---------- Профіль ---------- */
+.st-cols { display: flex; flex-direction: column; gap: var(--s5); }
+.st-col { display: contents; }
+.st-o1 { order: 1; } .st-o2 { order: 2; } .st-o3 { order: 3; } .st-o4 { order: 4; } .st-o5 { order: 5; } .st-o6 { order: 6; }
+@media (min-width: 1000px) {
+  .st-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .st-col { display: flex; flex-direction: column; gap: var(--s5); }
+}
+.st-account { display: flex; align-items: center; gap: var(--s4); }
+.st-name { font-size: 20px; overflow-wrap: anywhere; }
+.st-settings { border-top: 1px solid var(--border); }
+.st-stepper { display: inline-flex; align-items: center; flex: none; gap: 2px; padding: 2px; border-radius: var(--r-full); background: var(--surface-3); }
+.st-stepper output { min-width: 28px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+.st-stepper .icon-btn { border-radius: 50%; }
+.st-stepper .icon-btn:disabled { opacity: .35; cursor: not-allowed; }
+.st-theme button { display: inline-flex; align-items: center; gap: 6px; }
+.st-theme svg { width: 15px; height: 15px; }
+.st-pw .input { padding-right: 44px; }
