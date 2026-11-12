@@ -193,7 +193,7 @@ async function renderRoute({ scroll = true } = {}) {
   try {
     const mod = await route.view();
     if (!ctx.isActive()) return;
-    root.innerHTML = '';
+    // Індикатор лишається, доки сторінка не відмалює себе (setHTML замінює його вмістом).
     await mod.default(ctx);
   } catch (e) {
     if (!ctx.isActive()) return;
@@ -232,6 +232,8 @@ const LEGACY_TABS = {
 function processDeepLink(href, { fromPush = false } = {}) {
   const url = new URL(href, location.origin);
   const q = url.searchParams;
+  // Старі адреси зі сповіщень мають вигляд «/?tab=…», «/?lesson=…» — лише на головному шляху.
+  if (url.pathname !== '/') return fromPush ? navigate(url.pathname + url.search) : renderRoute();
   if (q.has('lesson')) return navigate(`/schedule?lesson=${encodeURIComponent(q.get('lesson'))}${q.get('join') ? '&join=1' : ''}`, { replace: !fromPush });
   if (q.has('homework')) return navigate(`/homework?lesson=${encodeURIComponent(q.get('homework'))}&new=1`, { replace: !fromPush });
   if (q.has('answered')) {
