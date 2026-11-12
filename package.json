@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
-    "make-admin": "node scripts/make-admin.js"
+    "make-admin": "node scripts/make-admin.js",
+    "dev": "node scripts/dev.js"
   },
   "dependencies": {
     "mongodb": "^6.8.0",
