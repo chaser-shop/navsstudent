@@ -1,0 +1,208 @@
+/* Стилі розділів керування: акаунти, рейтинг, оцінки, розсилка (доповнюють css/app.css). Усі класи мають префікс mg-. */
+
+/* ---------- Спільне ---------- */
+.mg-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.mg-btns { display: inline-flex; gap: 2px; flex: none; }
+/* Контейнер полів: відступи дає gap, тож гасимо поля між сусідніми .field із дизайн-системи. */
+.mg-form, .mg-fields { display: flex; flex-direction: column; gap: var(--s4); }
+.mg-form .field + .field, .mg-form .field + .field-row, .mg-form .field-row + .field,
+.mg-fields .field + .field, .mg-fields .field + .field-row, .mg-fields .field-row + .field { margin-top: 0; }
+.mg-count { margin: 0 2px var(--s2); font-size: 13px; color: var(--muted); }
+.mg-gap { margin-top: var(--s6); }
+.mg-h2 { font-size: 17px; }
+.mg-link {
+  padding: 0; border: 0; background: none; font: inherit; font-weight: 600; font-size: 14.5px; color: var(--text); text-align: left;
+}
+.mg-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Панель інструментів: вибір, пошук, дія */
+.mg-bar { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; margin-bottom: var(--s3); }
+.mg-bar-group { flex: 1 1 200px; min-width: 0; max-width: 100%; }
+.mg-bar-search { flex: 2 1 220px; min-width: 0; }
+.mg-bar-add { flex: none; }
+.mg-bar .segmented { flex: none; }
+.mg-hint { margin: 0 2px var(--s4); }
+@media (max-width: 599px) {
+  .mg-bar > * { flex: 1 1 100%; }
+  .mg-bar .segmented { display: flex; }
+  .mg-bar .segmented button { flex: 1; }
+}
+
+/* Вкладки сторінки «Рейтинг і групи» */
+.mg-tabs { margin-bottom: var(--s5); }
+.mg-tabs .segmented { display: flex; width: 100%; }
+.mg-tabs .segmented button { flex: 1; padding: 8px 10px; }
+@media (min-width: 720px) {
+  .mg-tabs .segmented { display: inline-flex; width: auto; }
+  .mg-tabs .segmented button { flex: none; padding: 8px 20px; }
+}
+
+/* ---------- Акаунти й пристрої ---------- */
+.mg-requests:not(:empty) { margin-bottom: var(--s8); }
+.mg-requests-card { overflow: hidden; border-color: color-mix(in srgb, var(--warning) 30%, var(--border)); }
+.mg-requests-help { padding: var(--s3) var(--s5) 0; }
+.mg-req { align-items: flex-start; flex-wrap: wrap; }
+.mg-req > .grow { min-width: 160px; }
+.mg-req .meta { white-space: normal; }
+.mg-req-actions { margin-left: auto; }
+@media (max-width: 599px) {
+  .mg-requests-help { padding: var(--s3) var(--s4) 0; }
+  .mg-req-actions { flex: 1 1 100%; padding-left: 48px; }
+  .mg-req-actions .btn { flex: 1; }
+}
+
+.mg-toolbar { display: flex; flex-direction: column; gap: var(--s3); margin-bottom: var(--s4); }
+@media (min-width: 720px) { .mg-toolbar .input-group { max-width: 440px; } }
+.mg-toolbar .chip { flex: none; }
+.mg-chip-n {
+  margin-left: 2px; padding: 0 6px; border-radius: var(--r-full); background: var(--surface-3); color: var(--muted);
+  font-size: 12px; font-weight: 650; line-height: 18px; font-variant-numeric: tabular-nums;
+}
+.chip.active .mg-chip-n { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-strong); }
+@media (max-width: 719px) {
+  .mg-toolbar .chip-list { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--s4)); padding: 2px var(--s4); }
+  .mg-toolbar .chip-list::-webkit-scrollbar { display: none; }
+}
+
+.mg-acc { align-items: flex-start; padding-top: var(--s3); padding-bottom: var(--s3); }
+.mg-acc .avatar { margin-top: 2px; }
+.mg-acc > .grow { display: flex; flex-direction: column; gap: 3px; }
+.mg-acc .title, .mg-acc .meta { display: block; }
+.mg-acc .mg-badges { margin: 1px 0 2px; }
+.mg-acc .chev { margin-top: 9px; }
+
+/* Картка акаунта */
+.mg-detail { display: flex; flex-direction: column; }
+.mg-head { display: flex; align-items: center; gap: var(--s4); padding-bottom: var(--s4); }
+.mg-sec { padding: var(--s4) 0; border-top: 1px solid var(--border); }
+.mg-sec:empty { display: none; }
+.mg-sec > .label { display: block; margin-bottom: 6px; }
+.mg-sec-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s3); }
+.mg-sec-head h3 { font-size: 15px; }
+.mg-sec .help, .mg-sec .error-text { margin-top: 6px; }
+.mg-inline { display: flex; gap: var(--s2); align-items: stretch; }
+.mg-inline .select { flex: 1; min-width: 0; }
+.mg-inline .btn { flex: none; }
+.mg-suggest {
+  display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); padding: 8px 10px;
+  border-radius: var(--r-sm); background: var(--accent-softer); font-size: 13.5px;
+}
+.mg-suggest > svg { width: 16px; height: 16px; color: var(--accent); flex: none; }
+.mg-rows { display: flex; flex-direction: column; gap: var(--s2); }
+.alert .mg-rows { margin-top: var(--s2); }
+.mg-row {
+  display: flex; align-items: center; gap: var(--s3); padding: 10px 12px; border-radius: var(--r-sm);
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.alert .mg-row { background: var(--surface); }
+.mg-row .grow { min-width: 0; overflow-wrap: anywhere; }
+.mg-row-ic { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--surface-3); color: var(--muted); flex: none; }
+.mg-row-ic svg { width: 16px; height: 16px; }
+.mg-code { margin-top: var(--s3); }
+@media (max-width: 599px) {
+  .mg-row { flex-wrap: wrap; }
+  .mg-row .btn-row { flex: 1 1 100%; }
+  .mg-row .btn-row .btn { flex: 1; }
+  .mg-inline .btn { padding: 0 var(--s3); }
+}
+
+/* ---------- Рейтинг: таблиця записів ---------- */
+.mg-table th.mg-subj { text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.mg-table .mg-who { display: flex; flex-direction: column; min-width: 0; text-align: left; }
+.mg-table .mg-note { font-size: 12.5px; color: var(--muted); font-weight: 450; }
+.mg-table .mg-rank { width: 64px; color: var(--muted); font-weight: 650; }
+.mg-table .mg-actions { width: 1%; white-space: nowrap; }
+@media (max-width: 719px) {
+  .mg-table.responsive tr { display: flex; flex-direction: column; }
+  .mg-table.responsive td.primary { order: -1; padding-bottom: 4px; }
+  .mg-table.responsive td.mg-rank { width: auto; }
+  .mg-table.responsive td.mg-actions { width: auto; justify-content: flex-end; padding-top: var(--s2); }
+  .mg-table.responsive td.mg-actions::before { display: none; }
+}
+
+/* Групи */
+.mg-group { padding-top: var(--s2); padding-bottom: var(--s2); }
+.mg-group-main { display: block; min-width: 0; padding: 6px 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.mg-group-main .title, .mg-group-main .meta { display: block; }
+.mg-group-main:hover .title { color: var(--accent); }
+
+/* Форма запису: бали за предметами */
+.mg-score-grid { display: grid; gap: var(--s3); grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+.mg-score { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mg-score label { display: flex; flex-direction: column; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text-2); line-height: 1.25; }
+.mg-score-abbr, .mg-score-full { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-score-full { font-weight: 450; font-size: 11.5px; color: var(--muted); }
+.mg-new-subject { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: var(--s3); margin-top: var(--s4); }
+.mg-new-subject .field + .field { margin-top: 0; }
+@media (max-width: 599px) {
+  .mg-score .input.sm, .mg-new-subject .input.sm { min-height: 42px; font-size: 15px; }
+}
+
+/* Імпорт із файлу */
+.mg-drop { padding: var(--s8) var(--s5); }
+.mg-drop strong { color: var(--text); font-weight: 600; }
+.mg-drop:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.mg-mini .table { font-size: 13px; }
+.mg-mini .table th, .mg-mini .table td { padding: 8px var(--s3); }
+.mg-mini .table th { text-transform: none; letter-spacing: 0; }
+.mg-stats { display: grid; gap: var(--s3); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 600px) { .mg-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.mg-stat { padding: var(--s3) var(--s4); border-radius: var(--r); background: var(--surface-2); border: 1px solid var(--border); }
+.mg-stat .v { font-size: 24px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; }
+.mg-stat .l { font-size: 12.5px; color: var(--muted); }
+.mg-stat.warn { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 25%, transparent); }
+.mg-stat.warn .v { color: var(--warning); }
+
+/* Повні назви предметів */
+.mg-names { display: flex; flex-direction: column; gap: var(--s3); }
+.mg-name-row { display: grid; grid-template-columns: minmax(80px, 150px) minmax(0, 1fr); gap: var(--s3); align-items: center; }
+.mg-abbr { font-weight: 650; font-size: 14px; overflow-wrap: anywhere; }
+@media (max-width: 479px) {
+  .mg-name-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
+
+/* ---------- Оцінки ---------- */
+.mg-status-row { display: flex; align-items: flex-start; gap: var(--s4); }
+.mg-status-ic { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); flex: none; }
+.mg-status-ic svg { width: 20px; height: 20px; }
+.mg-status-btn { flex: none; }
+@media (max-width: 719px) {
+  .mg-status-row { flex-wrap: wrap; }
+  .mg-status-row > .grow { flex: 1 1 calc(100% - 60px); }
+  .mg-status-btn { width: 100%; }
+}
+.mg-opt:empty::after { content: "—"; color: var(--faint); }
+@media (max-width: 719px) { .mg-table.responsive td.mg-opt:empty { display: none; } }
+
+/* ---------- Розсилка ---------- */
+.mg-notify {
+  display: grid; gap: var(--s4); grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "form" "preview" "actions";
+}
+.mg-n-form { grid-area: form; }
+.mg-n-preview { grid-area: preview; }
+.mg-n-actions { grid-area: actions; }
+.mg-n-actions .btn { width: 100%; }
+@media (min-width: 900px) {
+  .mg-notify { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); grid-template-areas: "form preview" "actions preview"; align-items: start; }
+  .mg-n-preview { position: sticky; top: var(--s6); }
+  .mg-n-actions .btn { width: auto; min-width: 220px; }
+}
+.mg-counter { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Сповіщення на екрані телефона */
+.mg-phone {
+  padding: var(--s6) var(--s4); border-radius: var(--r-xl);
+  background: linear-gradient(160deg, color-mix(in srgb, var(--accent) 22%, var(--surface-3)), var(--surface-3) 70%);
+}
+.mg-push {
+  display: flex; align-items: flex-start; gap: var(--s3); padding: 12px; border-radius: 18px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.mg-push-ic { width: 38px; height: 38px; border-radius: 10px; }
+.mg-push-main { flex: 1; min-width: 0; }
+.mg-push-top { display: flex; justify-content: space-between; gap: var(--s2); font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.mg-push-title { margin-top: 2px; font-weight: 650; font-size: 14.5px; line-height: 1.3; overflow-wrap: anywhere; }
+.mg-push-body { margin-top: 2px; font-size: 14px; line-height: 1.4; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mg-push-empty { color: var(--faint); }
