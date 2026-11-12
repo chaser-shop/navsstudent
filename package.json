@@ -1,15 +1,22 @@
 {
   "name": "diary-web",
-  "version": "1.0.0",
-  "description": "Щоденник студента — вебверсія й сервер (Node.js + MongoDB + Web Push)",
+  "version": "2.0.0",
+  "description": "Електронний щоденник і рейтинг студентів — вебверсія й сервер (Node.js + MongoDB + Web Push)",
   "main": "server.js",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "make-admin": "node scripts/make-admin.js"
   },
   "dependencies": {
     "mongodb": "^6.8.0",
     "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^10.4.3"
   }
 }

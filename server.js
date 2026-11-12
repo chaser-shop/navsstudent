@@ -11,6 +11,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
 const webpush = require('web-push');
+const { hashPassword, verifyPassword, passwordProblem, resetCode } = require('./lib/passwords');
+const createRatingService = require('./lib/rating-service');
+const createRatingReader = require('./lib/rating-read');
+const registerRatingRoutes = require('./lib/rating-routes');
+const { makeClock } = require('./lib/time');
 
 // ───────────────────────── Налаштування ─────────────────────────
 
@@ -30,7 +35,14 @@ const GOOGLE_SHEET_ID = (process.env.GOOGLE_SHEET_ID || '1grET3-MHCkBXqrBrHL1BIi
 const GOOGLE_SHEET_GID = (process.env.GOOGLE_SHEET_GID || '0').trim();
 const GOOGLE_SHEET_GROUP = (process.env.GOOGLE_SHEET_GROUP || '101 СПД').trim();
 const GOOGLE_SERVICE_ACCOUNT_JSON = (process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '').trim();
+// Необов’язково: пряма адреса опублікованого CSV (замість GOOGLE_SHEET_ID).
+const GOOGLE_SHEET_CSV_URL = (process.env.GOOGLE_SHEET_CSV_URL || '').trim();
 const GOOGLE_SHEET_INTERVAL_MS = Math.max(60000, parseInt(process.env.GOOGLE_SHEET_INTERVAL_MS, 10) || 5 * 60 * 1000);
+// Найбільший бал, до якого студент може підвищити свій бал з предмета.
+const SCORE_MAX = Math.min(100000, Math.max(1, Number(process.env.SCORE_MAX) || 100));
+// Година (за APP_TZ), коли студентам надходить щоденне сповіщення про прогрес.
+const PROGRESS_HOUR = Math.min(23, Math.max(0, parseInt(process.env.PROGRESS_HOUR, 10) || 19));
+const clock = makeClock(APP_TZ);
 
 // Apple відхиляє підписи сповіщень (403 BadJwtToken), якщо «sub» фіктивний (example.com, you@…).
 // Тому підставну адресу замінюємо на https-адресу самого сервісу, а в логах просимо вказати реальну.
@@ -101,6 +113,7 @@ function cleanSettings(s) {
     leadMinutes: clampInt(s.leadMinutes, 1, 15, 2),
     askHomework: s.askHomework !== false,
     notifyHomework: s.notifyHomework !== false,
+    notifyProgress: s.notifyProgress !== false,
   };
 }
 
@@ -149,10 +162,17 @@ async function initDb() {
   gradesSeen = db.collection('gradesSeen'); // id оцінок, про які адміністратора вже сповіщено
   ratings = db.collection('navsrating'); // рейтинг студентів: один запис = студент у групі
   groupsCol = db.collection('navsrating_groups'); // навчальні групи (_id = назва)
+  Object.assign(ctx.col, {
+    users, config, pushSubs, ratings, groups: groupsCol,
+    history: db.collection('ratingHistory'), // журнал усіх змін балів
+    syncRuns: db.collection('ratingSyncRuns'), // історія синхронізацій з Google-таблицею
+    conflicts: db.collection('ratingConflicts'), // розбіжності таблиці з новішими балами
+    activity: db.collection('userActivity'), // відвідування за днями (для «активних студентів»)
+  });
+  ctx.client = client;
+  ctx.db = db;
 
   await users.createIndex({ nameKey: 1 }, { unique: true });
-  await ratings.createIndex({ group: 1, nameKey: 1 }, { unique: true });
-  await ratings.createIndex({ nameKey: 1 });
   await lessons.createIndex({ start: 1 });
   await lessons.createIndex({ end: 1 });
   await homework.createIndex({ due: 1 });
@@ -163,7 +183,7 @@ async function initDb() {
   await noHw.createIndex({ at: 1 }, { expireAfterSeconds: 90 * 24 * 3600 });
   await sent.createIndex({ at: 1 }, { expireAfterSeconds: 3 * 24 * 3600 });
 
-  await seedRating();
+  await rating.init();
 
   SECRET = process.env.JWT_SECRET || (await getConfig('jwtSecret', () => crypto.randomBytes(32).toString('hex')));
 
@@ -182,8 +202,9 @@ async function initDb() {
 
 const TOKEN_TTL = 365 * 24 * 3600 * 1000;
 
-function signToken(uid, deviceId) {
-  const p = Buffer.from(JSON.stringify({ u: uid, d: deviceId || '', t: Date.now() })).toString('base64url');
+// v — версія сеансів користувача: зміна пароля чи скидання адміністратором робить старі токени недійсними.
+function signToken(uid, deviceId, version) {
+  const p = Buffer.from(JSON.stringify({ u: uid, d: deviceId || '', v: version || 0, t: Date.now() })).toString('base64url');
   const s = crypto.createHmac('sha256', SECRET).update(p).digest('base64url');
   return p + '.' + s;
 }
@@ -217,7 +238,10 @@ setInterval(() => attempts.clear(), 60 * 60 * 1000).unref();
 const ROLES = { starosta: 'Староста', deputy: 'Заступник старости' };
 /** Адміністратор, староста або заступник старости: підтверджують домашнє й завантажують розклад. */
 const isMod = (u) => !!(u && (u.isAdmin || ROLES[u.role]));
-const pubUser = (u) => ({ id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', canModerate: isMod(u) });
+const pubUser = (u) => ({
+  id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', canModerate: isMod(u),
+  hasPassword: !!u.passwordHash, studentId: u.studentId || '', studentName: u.studentName || '', group: u.group || '',
+});
 const pubLesson = (l) => ({
   id: l._id, pair: l.pair, start: l.start, end: l.end, subjectKey: l.subjectKey,
   kind: l.kind, topic: l.topic, room: l.room, teacher: l.teacher, isRemote: !!l.isRemote,
@@ -614,74 +638,187 @@ function route(method, pattern, handler, opts = {}) {
 
 const ok = () => ({});
 
+// Спільний контекст для модулів lib/: колекції заповнює initDb().
+const ctx = {
+  route, HttpError, col: {}, client: null, db: null,
+  cfg: {
+    APP_TZ, SCORE_MAX, PROGRESS_HOUR, ROOT_DIR: __dirname,
+    GOOGLE_SHEET_ID, GOOGLE_SHEET_GID, GOOGLE_SHEET_GROUP, GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_CSV_URL, GOOGLE_SHEET_INTERVAL_MS,
+  },
+  sendPush: (sub, payload) => sendPush(sub, payload),
+  claim: (key) => claim(key),
+};
+
+// Остання активність (для панелі адміністратора): не частіше ніж раз на 5 хвилин на людину.
+const touchedAt = new Map();
+function touchUser(user) {
+  const now = Date.now();
+  if (now - (touchedAt.get(user._id) || 0) < 5 * 60 * 1000) return;
+  touchedAt.set(user._id, now);
+  const day = clock.dayKey(now);
+  users.updateOne({ _id: user._id }, { $set: { lastSeenAt: new Date(now) } }).catch(() => {});
+  ctx.col.activity.updateOne(
+    { _id: `${user._id}|${day}` },
+    { $set: { userId: user._id, day, at: new Date(now) }, $inc: { hits: 1 } },
+    { upsert: true },
+  ).catch(() => {});
+}
+
 let VAPID_PUBLIC = '';
 
-// — вхід
-route('POST', '/api/auth/login', async ({ body, ip, req }) => {
-  rateLimit(ip);
+// — вхід і облікові записи
+// Кожен акаунт захищено паролем (scrypt). Старий акаунт без пароля входить лише з уже прив’язаного
+// пристрою (або після підтвердження адміністратором) і одразу створює пароль.
+
+const loginFailures = new Map(); // userId → { count, until }
+function checkLoginLock(userId) {
+  const f = loginFailures.get(userId);
+  if (f && f.until > Date.now()) {
+    const mins = Math.ceil((f.until - Date.now()) / 60000);
+    throw new HttpError(429, `Забагато невдалих спроб. Спробуйте через ${mins} хв.`, { code: 'locked' });
+  }
+}
+function noteLoginFailure(userId) {
+  const f = loginFailures.get(userId) || { count: 0, until: 0 };
+  f.count += 1;
+  if (f.count >= 8) { f.until = Date.now() + 15 * 60 * 1000; f.count = 0; }
+  loginFailures.set(userId, f);
+}
+setInterval(() => { const now = Date.now(); for (const [k, f] of loginFailures) if (f.until < now) loginFailures.delete(k); }, 3600 * 1000).unref();
+
+const NAME_RE = /^[\p{L}\p{M}'’ʼ`.\- ]+$/u;
+function readLoginBody(body) {
   const fullName = normName(body.fullName);
   const deviceId = str(body.deviceId, 100);
-  if (fullName.length > 100 || fullName.split(' ').length < 2) {
-    throw new HttpError(400, 'Введіть прізвище, ім’я та по батькові.');
-  }
+  if (fullName.length > 100 || fullName.split(' ').length < 2) throw new HttpError(400, 'Введіть прізвище, ім’я та по батькові.');
   if (!deviceId) throw new HttpError(400, 'Не вказано ідентифікатор пристрою.');
-  const nameKey = normKey(fullName);
-  const adminByName = ADMIN_NAMES.has(nameKey);
+  return { fullName, deviceId, nameKey: normKey(fullName), password: typeof body.password === 'string' ? body.password.slice(0, 200) : '' };
+}
 
+async function bindDevice(user, deviceId, label) {
+  if (user.deviceIds.includes(deviceId)) return;
+  if (deviceLimitReached(user)) {
+    throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
+  }
+  await addDevice(user, deviceId, label);
+}
+
+// Новий пристрій без пароля: не відмовляємо, а надсилаємо запит адміністратору.
+async function requestDevice(user, deviceId, label) {
+  if (!user.pendingDevices.some((p) => p.deviceId === deviceId)) {
+    if (deviceLimitReached(user)) {
+      throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
+    }
+    user.pendingDevices = [...user.pendingDevices.slice(-4), { key: devKey(deviceId), deviceId, label, requestedAt: new Date() }];
+    await users.updateOne({ _id: user._id }, { $set: { pendingDevices: user.pendingDevices } });
+    notifyDeviceRequest(user, label);
+  }
+  throw new HttpError(403, 'Запит на вхід з цього пристрою надіслано адміністратору. Щойно він підтвердить — вхід відбудеться автоматично.', { code: 'device_pending' });
+}
+
+const sessionFor = (user, deviceId) => ({ token: signToken(user._id, deviceId, user.sessionVersion || 0), user: pubUser(user) });
+const resetActive = (u) => !!(u.resetCodeHash && u.resetCodeExpiresAt && +new Date(u.resetCodeExpiresAt) > Date.now());
+const cleanCode = (s) => String(s || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+
+route('POST', '/api/auth/login', async ({ body, ip, req }) => {
+  rateLimit(ip);
+  const { deviceId, nameKey, password } = readLoginBody(body);
+  const user = await users.findOne({ nameKey });
+  if (!user) throw new HttpError(404, 'Акаунт із таким ПІБ не знайдено. Перевірте написання або зареєструйтеся.', { code: 'no_account' });
+  normDevices(user);
   const label = devLabel(body, req);
-  let user = await users.findOne({ nameKey });
-  if (!user) {
-    const isAdmin = adminByName || (ADMIN_NAMES.size === 0 && (await users.countDocuments({})) === 0);
-    user = {
-      _id: crypto.randomUUID(), fullName, nameKey, isAdmin, deviceIds: [deviceId],
-      deviceMeta: { [devKey(deviceId)]: { label, addedAt: new Date() } }, pendingDevices: [], createdAt: new Date(),
-    };
-    try {
-      await users.insertOne(user);
-    } catch (e) {
-      if (e && e.code === 11000) throw new HttpError(409, 'Цей ПІБ щойно зареєстровано. Спробуйте ще раз.');
-      throw e;
+  if (user.passwordHash || resetActive(user)) {
+    if (!password) {
+      throw new HttpError(403, user.passwordHash ? 'Введіть пароль.' : 'Введіть код відновлення, який видав адміністратор.', { code: 'password_required', reset: !user.passwordHash });
     }
+    checkLoginLock(user._id);
+    const good = (user.passwordHash && (await verifyPassword(password, user.passwordHash)))
+      || (resetActive(user) && (await verifyPassword(cleanCode(password), user.resetCodeHash)));
+    if (!good) {
+      noteLoginFailure(user._id);
+      throw new HttpError(403, 'Невірний пароль.', { code: 'password_required', reason: 'invalid' });
+    }
+    loginFailures.delete(user._id);
+    if (REQUIRE_DEVICE_APPROVAL && !user.isAdmin && user.deviceIds.length && !user.deviceIds.includes(deviceId)) await requestDevice(user, deviceId, label);
+    await bindDevice(user, deviceId, label);
+  } else if (user.deviceIds.includes(deviceId) || user.deviceIds.length === 0) {
+    // Старий акаунт без пароля: знайомий пристрій або адміністратор відв’язав усі пристрої.
+    await bindDevice(user, deviceId, label);
+  } else if (user.isAdmin && ADMIN_PASSWORD) {
+    if (!password) throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
+    if (!safeEq(password, ADMIN_PASSWORD)) throw new HttpError(403, 'Невірний пароль.', { code: 'password_required', reason: 'invalid' });
+    await bindDevice(user, deviceId, label);
   } else {
-    if (adminByName && !user.isAdmin) {
-      user.isAdmin = true;
-      await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
-    }
-    normDevices(user);
-    if (!user.deviceIds.includes(deviceId)) {
-      if (user.deviceIds.length === 0) {
-        // Адміністратор відв'язав усі пристрої — перший, хто увійде, стає новим.
-        await addDevice(user, deviceId, label);
-      } else if (user.isAdmin && ADMIN_PASSWORD && body.password) {
-        // Адміністратор може додати пристрій сам — паролем.
-        if (!safeEq(String(body.password), ADMIN_PASSWORD)) throw new HttpError(403, 'Невірний пароль.', { code: 'password_required' });
-        await addDevice(user, deviceId, label);
-      } else if (user.isAdmin && ADMIN_PASSWORD && !body.password && !user.pendingDevices.some((p) => p.deviceId === deviceId)) {
-        throw new HttpError(403, 'Для входу адміністратора з нового пристрою введіть пароль.', { code: 'password_required' });
-      } else if (!user.isAdmin && !REQUIRE_DEVICE_APPROVAL) {
-        // Звичайний учасник: новий пристрій додається одразу, без запиту адміністратору.
-        if (deviceLimitReached(user)) {
-          throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
-        }
-        await addDevice(user, deviceId, label);
-      } else {
-        // Новий пристрій людини, яка вже має інші: не відмовляємо, а надсилаємо запит адміністратору.
-        const already = user.pendingDevices.some((p) => p.deviceId === deviceId);
-        if (!already) {
-          if (deviceLimitReached(user)) {
-            throw new HttpError(403, `До акаунта вже прив’язано максимум пристроїв (${MAX_DEVICES}). Попросіть адміністратора відв’язати непотрібний.`, { code: 'device_limit' });
-          }
-          const entry = { key: devKey(deviceId), deviceId, label, requestedAt: new Date() };
-          user.pendingDevices = [...user.pendingDevices.slice(-4), entry];
-          await users.updateOne({ _id: user._id }, { $set: { pendingDevices: user.pendingDevices } });
-          notifyDeviceRequest(user, label);
-        }
-        throw new HttpError(403, 'Запит на додавання пристрою надіслано адміністратору. Щойно він підтвердить — вхід відбудеться автоматично.', { code: 'device_pending' });
-      }
+    await requestDevice(user, deviceId, label);
+  }
+  if (ADMIN_NAMES.has(nameKey) && !user.isAdmin) {
+    user.isAdmin = true;
+    await users.updateOne({ _id: user._id }, { $set: { isAdmin: true } });
+  }
+  return sessionFor(user, deviceId);
+}, { auth: false });
+
+route('POST', '/api/auth/register', async ({ body, ip, req }) => {
+  rateLimit('reg|' + ip, 20);
+  const { fullName, deviceId, nameKey, password } = readLoginBody(body);
+  if (!NAME_RE.test(fullName)) throw new HttpError(400, 'ПІБ може містити лише літери, апостроф, дефіс і пробіли.');
+  const problem = passwordProblem(password, fullName);
+  if (problem) throw new HttpError(400, problem, { code: 'weak_password' });
+  if (await users.findOne({ nameKey })) {
+    throw new HttpError(409, 'Акаунт із таким ПІБ уже існує. Увійдіть або зверніться до адміністратора.', { code: 'exists' });
+  }
+  const adminByName = ADMIN_NAMES.has(nameKey);
+  // ПІБ адміністратора не можна «зайняти» першим: потрібен пароль адміністратора із налаштувань сервера.
+  if (adminByName && ADMIN_PASSWORD && !safeEq(String(body.adminPassword || ''), ADMIN_PASSWORD)) {
+    throw new HttpError(403, 'Цей ПІБ належить адміністратору. Введіть пароль адміністратора з налаштувань сервера.', { code: 'admin_password_required' });
+  }
+  const isAdmin = adminByName || (ADMIN_NAMES.size === 0 && (await users.countDocuments({})) === 0);
+  const label = devLabel(body, req);
+  const now = new Date();
+  const user = {
+    _id: crypto.randomUUID(), fullName, nameKey, isAdmin, deviceIds: [deviceId],
+    deviceMeta: { [devKey(deviceId)]: { label, addedAt: now } }, pendingDevices: [], createdAt: now,
+    passwordHash: await hashPassword(password), passwordSetAt: now, sessionVersion: 0,
+  };
+  try {
+    await users.insertOne(user);
+  } catch (e) {
+    if (e && e.code === 11000) throw new HttpError(409, 'Акаунт із таким ПІБ уже існує.', { code: 'exists' });
+    throw e;
+  }
+  return sessionFor(user, deviceId);
+}, { auth: false });
+
+// Створення або зміна пароля. Зміна наявного пароля завершує сеанси на інших пристроях.
+route('POST', '/api/auth/password', async ({ body, user, req }) => {
+  const next = typeof body.newPassword === 'string' ? body.newPassword : '';
+  if (user.passwordHash) {
+    checkLoginLock(user._id);
+    const current = typeof body.currentPassword === 'string' ? body.currentPassword : '';
+    if (!current || !(await verifyPassword(current, user.passwordHash))) {
+      noteLoginFailure(user._id);
+      throw new HttpError(403, 'Поточний пароль введено неправильно.', { code: 'password_invalid' });
     }
   }
-  return { token: signToken(user._id, deviceId), user: pubUser(user) };
-}, { auth: false });
+  const problem = passwordProblem(next, user.fullName);
+  if (problem) throw new HttpError(400, problem, { code: 'weak_password' });
+  if (user.passwordHash && (await verifyPassword(next, user.passwordHash))) throw new HttpError(400, 'Новий пароль має відрізнятися від поточного.');
+  const update = { $set: { passwordHash: await hashPassword(next), passwordSetAt: new Date() }, $unset: { resetCodeHash: '', resetCodeExpiresAt: '' } };
+  if (user.passwordHash) update.$inc = { sessionVersion: 1 };
+  await users.updateOne({ _id: user._id }, update);
+  return sessionFor(await users.findOne({ _id: user._id }), req.deviceId);
+});
+
+// Вихід: пристрій відв’язується, токен перестає діяти. Акаунт без пароля пристрій не втрачає,
+// інакше його міг би «підхопити» будь-хто, хто введе той самий ПІБ.
+route('POST', '/api/auth/logout', async ({ user, req }) => {
+  if (!user.passwordHash) return ok();
+  normDevices(user);
+  const meta = { ...user.deviceMeta };
+  delete meta[devKey(req.deviceId)];
+  await users.updateOne({ _id: user._id }, { $set: { deviceIds: user.deviceIds.filter((d) => d !== req.deviceId), deviceMeta: meta } });
+  return ok();
+});
 
 // — стан запиту на новий пристрій (клієнт опитує його, поки адміністратор не підтвердить)
 route('POST', '/api/auth/device-status', async ({ body, ip }) => {
@@ -991,6 +1128,7 @@ route('GET', '/api/admin/users', async () => {
     return {
       id: u._id, fullName: u.fullName, isAdmin: !!u.isAdmin, role: ROLES[u.role] ? u.role : '', group: u.group || '',
       studentId: u.studentId || '', studentName: u.studentName || '',
+      hasPassword: !!u.passwordHash, resetPending: resetActive(u), lastSeenAt: u.lastSeenAt || null,
       devices: u.deviceIds.length, pushDevices: pushCount[u._id] || 0, createdAt: u.createdAt,
       deviceList: u.deviceIds.map((id, i) => {
         const m = u.deviceMeta[devKey(id)] || {};
@@ -1024,442 +1162,12 @@ route('POST', '/api/admin/notify', async ({ body }) => {
   return { sent, total: subs.length };
 }, { admin: true });
 
-// Список студентів для прив’язки до пристроїв.
-route('GET', '/api/admin/rating-students', async () => {
-  const rows = await ratings.find({}, { projection: { _id: 1, fullName: 1, group: 1 } }).sort({ fullName: 1 }).toArray();
-  return rows.map((r) => ({ id: r._id, fullName: r.fullName, group: r.group || '' }));
-}, { admin: true });
-
-// Прив’язка запису рейтингу до облікового запису людини, а не до пристрою.
-// Усі підтверджені пристрої цього облікового запису показують один і той самий рейтинг.
-route('POST', '/api/admin/users/:id/student', async ({ params, body }) => {
-  const account = await users.findOne({ _id: params.id });
-  if (!account) throw new HttpError(404, 'Користувача не знайдено.');
-  const studentId = str(body.studentId, 64);
-  if (!studentId) {
-    await users.updateOne(
-      { _id: account._id },
-      { $unset: { studentId: '', studentName: '' } }
-    );
-    return ok();
-  }
-  const student = await ratings.findOne({ _id: studentId });
-  if (!student) throw new HttpError(404, 'Студента не знайдено в рейтингу. Спочатку оновіть таблицю рейтингу.');
-  await users.updateOne(
-    { _id: account._id },
-    { $set: { studentId: student._id, studentName: student.fullName } }
-  );
-  return { ok: true, student: student.fullName };
-}, { admin: true });
-
-// ───────────────────────── Рейтинг ─────────────────────────
-// Ключ для зіставлення студента з обліковим записом: без дужок на кшталт «(староста)», єдиний апостроф.
-const ratingKey = (n) => normKey(String(n || '').replace(/\([^)]*\)/g, ' ').replace(/[`'ʼ‘’]/g, '’'));
-const cleanGroup = (v) => str(normName(v), 40);
-
-function cleanPoints(v) {
-  if (v === null || v === undefined || v === '') return null;
-  const n = typeof v === 'number' ? v : Number(String(v).replace(',', '.'));
-  if (!Number.isFinite(n) || n < 0 || n > 100000) throw new HttpError(400, 'Бали — число від 0 до 100000.');
-  return Math.round(n * 100) / 100;
-}
-
-function cleanSubjects(o) {
-  const out = {};
-  if (o && typeof o === 'object' && !Array.isArray(o)) {
-    for (const [k, v] of Object.entries(o).slice(0, 20)) {
-      const key = str(k, 20).replace(/[.$]/g, '');
-      const val = key ? cleanPoints(v) : null;
-      if (val !== null) out[key] = val;
-    }
-  }
-  return out;
-}
-
-// Місця: за спаданням балів; однакові бали — однакове місце (1, 2, 2, 4). Без балів — без місця, внизу.
-function rankEntries(list) {
-  const sorted = [...list].sort((a, b) => (b.points == null ? -1 : b.points) - (a.points == null ? -1 : a.points) || a.fullName.localeCompare(b.fullName, 'uk'));
-  let prev = null;
-  let rank = 0;
-  return sorted.map((e, i) => {
-    if (e.points == null) return { ...e, rank: null };
-    if (e.points !== prev) { rank = i + 1; prev = e.points; }
-    return { ...e, rank };
-  });
-}
-
-// Група студента: призначена адміністратором, інакше — з рейтингової таблиці за ПІБ.
-async function groupOf(user) {
-  if (user.group) return user.group;
-  const e = await ratings.findOne({ nameKey: ratingKey(user.fullName) });
-  return e ? e.group : '';
-}
-
-async function listGroups() {
-  const [named, rAgg, uAgg] = await Promise.all([
-    groupsCol.find({}).toArray(),
-    ratings.aggregate([{ $group: { _id: '$group', n: { $sum: 1 } } }]).toArray(),
-    users.aggregate([{ $match: { group: { $type: 'string', $ne: '' } } }, { $group: { _id: '$group', n: { $sum: 1 } } }]).toArray(),
-  ]);
-  const map = new Map();
-  const get = (name) => { if (!map.has(name)) map.set(name, { name, students: 0, accounts: 0 }); return map.get(name); };
-  named.forEach((g) => get(g._id));
-  rAgg.forEach((g) => { get(g._id).students = g.n; });
-  uAgg.forEach((g) => { get(g._id).accounts = g.n; });
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'uk'));
-}
-
-const ensureGroup = (name) => groupsCol.updateOne({ _id: name }, { $setOnInsert: { createdAt: new Date() } }, { upsert: true });
-
-// Одноразовий безпечний імпорт першої таблиці (seed/rating-101-spd.json). Не перезаписує вже наявні записи.
-async function seedRating() {
-  const KEY = 'ratingSeed101spd';
-  let seed;
-  try { seed = JSON.parse(fs.readFileSync(path.join(__dirname, 'seed', 'rating-101-spd.json'), 'utf8')); } catch (e) { return; }
-  // Порядок предметів для вибору в рейтингу (далі його задає завантажена адміністратором таблиця).
-  if (Array.isArray(seed.subjects) && seed.subjects.length) {
-    await config.updateOne({ _id: 'ratingSubjects' }, { $setOnInsert: { value: seed.subjects } }, { upsert: true });
-  }
-  if (await config.findOne({ _id: KEY })) return;
-  const now = new Date();
-  let added = 0;
-  for (const e of seed.entries || []) {
-    try {
-      await ratings.insertOne({
-        _id: crypto.randomUUID(), group: seed.group, fullName: e.fullName, nameKey: ratingKey(e.fullName),
-        points: e.points == null ? null : e.points, subjects: e.subjects || {}, note: e.note || '', createdAt: now, updatedAt: now, source: seed.source,
-      });
-      added++;
-    } catch (err) { if (!err || err.code !== 11000) throw err; }
-  }
-  await ensureGroup(seed.group);
-  await config.updateOne({ _id: KEY }, { $set: { value: { at: now, added } } }, { upsert: true });
-  console.log(`Рейтинг: імпортовано ${added} студентів групи «${seed.group}».`);
-}
-
-const DEFAULT_RATING_GROUP = '101 СПД';
-
-// Список предметів рейтингу: з останньої завантаженої таблиці, інакше — зі збережених балів.
-async function ratingSubjects() {
-  const c = await config.findOne({ _id: 'ratingSubjects' });
-  if (c && Array.isArray(c.value) && c.value.length) return c.value;
-  const out = [];
-  for (const r of await ratings.find({}, { projection: { subjects: 1 } }).toArray()) {
-    for (const k of Object.keys(r.subjects || {})) if (!out.includes(k)) out.push(k);
-  }
-  return out;
-}
-
-const sumPoints = (subj) => {
-  const v = Object.values(subj);
-  return v.length ? Math.round(v.reduce((a, b) => a + b, 0) * 100) / 100 : null;
-};
-
-let googleTokenCache = { token: '', expiresAt: 0 };
-
-function b64url(value) {
-  return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url');
-}
-
-async function googleSheetsAccessToken() {
-  if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
-    throw new Error('Не налаштовано GOOGLE_SERVICE_ACCOUNT_JSON. Додайте ключ сервісного акаунта в секрети сервера; таблицю не потрібно робити публічною.');
-  }
-  if (googleTokenCache.token && googleTokenCache.expiresAt > Date.now() + 60000) return googleTokenCache.token;
-  let credentials;
-  try { credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON); }
-  catch { throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON має містити коректний JSON ключа сервісного акаунта.'); }
-  if (!credentials.client_email || !credentials.private_key) throw new Error('У ключі сервісного акаунта немає client_email або private_key.');
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url({ alg: 'RS256', typ: 'JWT' });
-  const claim = b64url({
-    iss: credentials.client_email,
-    scope: 'https://www.googleapis.com/auth/spreadsheets.readonly',
-    aud: credentials.token_uri || 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
-  });
-  const unsigned = `${header}.${claim}`;
-  const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), credentials.private_key).toString('base64url');
-  const assertion = `${unsigned}.${signature}`;
-  const tokenResponse = await fetch(credentials.token_uri || 'https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion }),
-    signal: AbortSignal.timeout(20000),
-  });
-  const tokenBody = await tokenResponse.json().catch(() => ({}));
-  if (!tokenResponse.ok || !tokenBody.access_token) throw new Error(`Google OAuth: ${tokenBody.error_description || tokenBody.error || `HTTP ${tokenResponse.status}`}`);
-  googleTokenCache = { token: tokenBody.access_token, expiresAt: Date.now() + (Number(tokenBody.expires_in) || 3600) * 1000 };
-  return googleTokenCache.token;
-}
-
-async function readGoogleSheetGrid() {
-  const token = await googleSheetsAccessToken();
-  const headers = { Authorization: `Bearer ${token}` };
-  const base = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(GOOGLE_SHEET_ID)}`;
-  const metaResponse = await fetch(`${base}?fields=${encodeURIComponent('sheets.properties(sheetId,title)')}`, { headers, signal: AbortSignal.timeout(20000) });
-  const meta = await metaResponse.json().catch(() => ({}));
-  if (!metaResponse.ok) throw new Error(`Не вдалося прочитати Google-таблицю: ${meta.error && meta.error.message || `HTTP ${metaResponse.status}`}`);
-  const sheet = (meta.sheets || []).map((x) => x.properties || {}).find((x) => String(x.sheetId) === GOOGLE_SHEET_GID);
-  if (!sheet) throw new Error(`У таблиці немає аркуша з gid=${GOOGLE_SHEET_GID}. Перевірте GOOGLE_SHEET_GID.`);
-  const range = `'${String(sheet.title).replace(/'/g, "''")}'!A:Z`;
-  const valuesResponse = await fetch(`${base}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`, { headers, signal: AbortSignal.timeout(20000) });
-  const data = await valuesResponse.json().catch(() => ({}));
-  if (!valuesResponse.ok) throw new Error(`Не вдалося завантажити значення аркуша: ${data.error && data.error.message || `HTTP ${valuesResponse.status}`}`);
-  return data.values || [];
-}
-
-function parseRatingGrid(grid) {
-  const clean = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
-  const nameHead = /(^|\s)(піб|прізвище)/i;
-  const skipHead = /^(№|n|#|разом|сума|всього|total|місце|рейтинг|середній)/i;
-  let headRow = -1, nameCol = -1;
-  for (let r = 0; r < Math.min(grid.length, 30) && headRow < 0; r++) {
-    for (let c = 0; c < (grid[r] || []).length; c++) {
-      if (nameHead.test(clean(grid[r][c]))) { headRow = r; nameCol = c; break; }
-    }
-  }
-  if (headRow < 0) throw new Error('У Google-таблиці не знайдено заголовок колонки «ПІБ» або «Прізвище».');
-  const subjects = [], cols = [];
-  const head = grid[headRow] || [];
-  for (let c = nameCol + 1; c < head.length; c++) {
-    const name = clean(head[c]).replace(/[.$]/g, '');
-    if (!name || skipHead.test(name) || subjects.includes(name)) continue;
-    subjects.push(name); cols.push(c);
-  }
-  if (!subjects.length) throw new Error('Праворуч від колонки ПІБ не знайдено предметів.');
-  const entries = [], seen = new Set();
-  for (let r = headRow + 1; r < grid.length; r++) {
-    let fullName = clean((grid[r] || [])[nameCol]);
-    if (!fullName) continue;
-    let note = '';
-    fullName = clean(fullName.replace(/\(([^)]*)\)/g, (_, value) => { note = note || clean(value); return ' '; }));
-    const key = ratingKey(fullName);
-    if (fullName.split(' ').length < 2 || seen.has(key)) continue;
-    seen.add(key);
-    const scores = {};
-    subjects.forEach((subject, i) => {
-      const raw = clean((grid[r] || [])[cols[i]]).replace(',', '.');
-      if (!raw) return;
-      const n = Number(raw);
-      if (Number.isFinite(n) && n >= 0 && n <= 100000) scores[subject] = Math.round(n * 100) / 100;
-    });
-    entries.push({ fullName, nameKey: key, note, subjects: scores, points: sumPoints(scores) });
-  }
-  if (!entries.length) throw new Error('У Google-таблиці не знайдено жодного студента.');
-  return { subjects, entries };
-}
-
-let googleRatingSyncBusy = false;
-async function syncGoogleSheetRating() {
-  if (!GOOGLE_SHEET_ID || googleRatingSyncBusy) return;
-  googleRatingSyncBusy = true;
-  const startedAt = new Date();
-  try {
-    const parsed = parseRatingGrid(await readGoogleSheetGrid());
-    const group = GOOGLE_SHEET_GROUP || DEFAULT_RATING_GROUP;
-    if (parsed.entries.length > 1000) throw new Error('У таблиці понад 1000 студентів — синхронізацію зупинено.');
-
-    const now = new Date();
-    const keys = parsed.entries.map((e) => e.nameKey);
-    await ratings.bulkWrite(parsed.entries.map((e) => ({
-      updateOne: {
-        filter: { group, nameKey: e.nameKey },
-        update: {
-          $set: { fullName: e.fullName, subjects: e.subjects, points: e.points, note: e.note, updatedAt: now, source: 'google-sheets' },
-          $setOnInsert: { _id: crypto.randomUUID(), createdAt: now },
-        },
-        upsert: true,
-      },
-    })), { ordered: false });
-    // Видаляємо лише після успішного завантаження й перевірки повного набору рядків.
-    await ratings.deleteMany({ group, nameKey: { $nin: keys } });
-    await ensureGroup(group);
-    await config.updateOne({ _id: 'ratingSubjects' }, { $set: { value: parsed.subjects } }, { upsert: true });
-    const state = { enabled: true, lastSuccessAt: now, lastAttemptAt: startedAt, lastError: '', students: parsed.entries.length, subjects: parsed.subjects.length, group, source: 'Google Sheets' };
-    await config.updateOne({ _id: 'googleRatingSync' }, { $set: { value: state } }, { upsert: true });
-    console.log(`Google Sheets: рейтинг оновлено — ${parsed.entries.length} студентів, ${parsed.subjects.length} предметів.`);
-    return state;
-  } catch (error) {
-    const previous = await config.findOne({ _id: 'googleRatingSync' }).catch(() => null);
-    const old = previous && previous.value ? previous.value : {};
-    const state = { ...old, enabled: true, lastAttemptAt: startedAt, lastError: String(error.message || error).slice(0, 500) };
-    await config.updateOne({ _id: 'googleRatingSync' }, { $set: { value: state } }, { upsert: true }).catch(() => {});
-    console.error('Google Sheets rating sync:', state.lastError);
-    return state;
-  } finally {
-    googleRatingSyncBusy = false;
-  }
-}
-
-route('POST', '/api/admin/rating/sync', async () => {
-  const state = await syncGoogleSheetRating();
-  if (!state || state.lastError) throw new HttpError(502, state && state.lastError || 'Синхронізація не виконана.');
-  return { ok: true, ...state };
-}, { admin: true });
-
-// Завантаження таблиці рейтингу (розібраної в браузері адміна): повністю оновлює рейтинг групи.
-// Студенти зіставляються за ПІБ: наявним оновлюються бали, нових додає, яких немає у файлі — видаляє.
-route('PUT', '/api/admin/rating/import', async ({ user, body }) => {
-  const subjList = [];
-  for (const raw of Array.isArray(body.subjects) ? body.subjects.slice(0, 20) : []) {
-    const k = str(raw, 20).replace(/[.$]/g, '').trim();
-    if (k && !subjList.includes(k)) subjList.push(k);
-  }
-  if (!subjList.length) throw new HttpError(400, 'У таблиці немає предметів.');
-  if (!Array.isArray(body.entries) || !body.entries.length) throw new HttpError(400, 'У таблиці немає студентів.');
-  if (body.entries.length > 1000) throw new HttpError(400, 'Забагато студентів у файлі.');
-
-  const group = cleanGroup(body.group) || (await groupOf(user)) || ((await listGroups())[0] || {}).name || DEFAULT_RATING_GROUP;
-  const byKey = new Map();
-  for (const raw of body.entries) {
-    const fullName = normName(raw && raw.fullName);
-    if (fullName.split(' ').length < 2 || fullName.length > 100) continue;
-    const nameKey = ratingKey(fullName);
-    if (byKey.has(nameKey)) continue;
-    const subjects = {};
-    for (const [k, v] of Object.entries(cleanSubjects(raw.subjects))) if (subjList.includes(k)) subjects[k] = v;
-    byKey.set(nameKey, { fullName, nameKey, subjects, points: sumPoints(subjects), note: str(raw.note, 60) });
-  }
-  if (!byKey.size) throw new HttpError(400, 'У таблиці не знайдено жодного коректного ПІБ.');
-
-  const now = new Date();
-  await ratings.deleteMany({ group, nameKey: { $nin: [...byKey.keys()] } });
-  await ratings.bulkWrite([...byKey.values()].map((e) => ({
-    updateOne: {
-      filter: { group, nameKey: e.nameKey },
-      update: {
-        $set: { fullName: e.fullName, subjects: e.subjects, points: e.points, note: e.note, updatedAt: now, source: 'import' },
-        $setOnInsert: { _id: crypto.randomUUID(), createdAt: now },
-      },
-      upsert: true,
-    },
-  })), { ordered: false });
-  await ensureGroup(group);
-  await config.updateOne({ _id: 'ratingSubjects' }, { $set: { value: subjList } }, { upsert: true });
-  return { ok: true, group, students: byKey.size, subjects: subjList.length };
-}, { admin: true });
-
-function readRatingBody(body, full) {
-  const set = {};
-  if (full || 'fullName' in body) {
-    const n = normName(body.fullName);
-    if (n.split(' ').length < 2 || n.length > 100) throw new HttpError(400, 'Введіть прізвище та ім’я (ПІБ).');
-    set.fullName = n;
-    set.nameKey = ratingKey(n);
-  }
-  if (full || 'group' in body) {
-    const g = cleanGroup(body.group);
-    if (!g) throw new HttpError(400, 'Оберіть групу.');
-    set.group = g;
-  }
-  if (full || 'points' in body) set.points = cleanPoints(body.points);
-  if ('subjects' in body) set.subjects = cleanSubjects(body.subjects);
-  if ('note' in body) set.note = str(body.note, 60);
-  set.updatedAt = new Date();
-  return set;
-}
-
-const dupRating = (e) => { if (e && e.code === 11000) throw new HttpError(409, 'Цей студент уже є в рейтингу цієї групи.'); throw e; };
-
-// Студент отримує ЛИШЕ свою групу (параметр group ігнорується). Адміністратор може дивитись будь-яку.
-// Розбивку за предметами бачить лише сам студент (у своєму рядку) та адміністратор.
-route('GET', '/api/rating', async ({ user, query, req }) => {
-  // Рейтинг прив’язаний тільки до облікового запису людини.
-  // Ідентифікатор пристрою використовується лише для авторизації, не для вибору студента.
-  const assignedId = user.studentId || '';
-  const assigned = assignedId ? await ratings.findOne({ _id: assignedId }) : null;
-  const own = assigned ? assigned.group : (await groupOf(user));
-  let group = own;
-  let groups = null;
-  if (user.isAdmin) {
-    groups = await listGroups();
-    group = cleanGroup(query.get('group')) || own || (groups[0] ? groups[0].name : '');
-  }
-  const subjects = await ratingSubjects();
-  const want = str(query.get('subject'), 20);
-  const subject = subjects.includes(want) ? want : ''; // '' — загальний рейтинг (сума балів)
-  if (!group || (!user.isAdmin && !assigned)) { const syncDoc = user.isAdmin ? await config.findOne({ _id: 'googleRatingSync' }) : null; return { group: '', own: '', groups, subjects, subject, entries: [], me: null, unassigned: !user.isAdmin && !assigned, ...(user.isAdmin ? { syncStatus: syncDoc && syncDoc.value || { enabled: !!GOOGLE_SHEET_ID } } : {}) }; }
-  const meKey = assigned ? assigned.nameKey : ratingKey(user.fullName);
-  const rows = await ratings.find({ group }).toArray();
-  const ranked = rankEntries(subject
-    ? rows.map((e) => ({ ...e, points: e.subjects && e.subjects[subject] != null ? e.subjects[subject] : null }))
-    : rows);
-  const entries = ranked.map((e) => {
-    const isMe = assigned ? String(e._id) === String(assigned._id) : e.nameKey === meKey;
-    return {
-      ...(user.isAdmin ? { id: e._id } : {}),
-      rank: e.rank, fullName: e.fullName, points: e.points, note: e.note || '', isMe,
-      ...(isMe || user.isAdmin ? { subjects: e.subjects || {} } : {}),
-    };
-  });
-  const me = entries.find((e) => e.isMe) || null;
-  const syncDoc = user.isAdmin ? await config.findOne({ _id: 'googleRatingSync' }) : null;
-  return { group, own, groups, subjects, subject, entries, total: entries.length, me: me && { rank: me.rank, points: me.points }, ...(user.isAdmin ? { syncStatus: syncDoc && syncDoc.value || { enabled: !!GOOGLE_SHEET_ID } } : {}) };
-});
-
-route('GET', '/api/admin/groups', async () => listGroups(), { admin: true });
-
-route('POST', '/api/admin/groups', async ({ body }) => {
-  const name = cleanGroup(body.name);
-  if (!name) throw new HttpError(400, 'Введіть назву групи.');
-  await ensureGroup(name);
-  return { name };
-}, { admin: true });
-
-route('PATCH', '/api/admin/groups', async ({ body }) => {
-  const from = cleanGroup(body.from);
-  const to = cleanGroup(body.to);
-  if (!from || !to) throw new HttpError(400, 'Вкажіть стару й нову назву групи.');
-  if (from === to) return ok();
-  try {
-    await ratings.updateMany({ group: from }, { $set: { group: to } });
-  } catch (e) { dupRating(e); }
-  await users.updateMany({ group: from }, { $set: { group: to } });
-  await groupsCol.deleteOne({ _id: from });
-  await ensureGroup(to);
-  return ok();
-}, { admin: true });
-
-route('DELETE', '/api/admin/groups/:name', async ({ params }) => {
-  const name = cleanGroup(params.name);
-  if ((await ratings.countDocuments({ group: name })) || (await users.countDocuments({ group: name }))) {
-    throw new HttpError(409, 'Група не порожня: спершу видаліть її студентів із рейтингу й зніміть групу в учасників.');
-  }
-  await groupsCol.deleteOne({ _id: name });
-  return ok();
-}, { admin: true });
-
-route('POST', '/api/admin/rating', async ({ body }) => {
-  const doc = { _id: crypto.randomUUID(), createdAt: new Date(), subjects: {}, note: '', ...readRatingBody(body, true) };
-  try { await ratings.insertOne(doc); } catch (e) { dupRating(e); }
-  await ensureGroup(doc.group);
-  return { id: doc._id };
-}, { admin: true });
-
-route('PATCH', '/api/admin/rating/:id', async ({ params, body }) => {
-  const set = readRatingBody(body, false);
-  let r;
-  try { r = await ratings.updateOne({ _id: params.id }, { $set: set }); } catch (e) { dupRating(e); }
-  if (!r.matchedCount) throw new HttpError(404, 'Запис не знайдено.');
-  if (set.group) await ensureGroup(set.group);
-  return ok();
-}, { admin: true });
-
-route('DELETE', '/api/admin/rating/:id', async ({ params }) => {
-  const r = await ratings.deleteOne({ _id: params.id });
-  if (!r.deletedCount) throw new HttpError(404, 'Запис не знайдено.');
-  return ok();
-}, { admin: true });
-
-route('POST', '/api/admin/users/:id/group', async ({ params, body }) => {
-  const g = cleanGroup(body.group);
-  const r = await users.updateOne({ _id: params.id }, g ? { $set: { group: g } } : { $unset: { group: '' } });
-  if (!r.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
-  if (g) await ensureGroup(g);
-  return ok();
-}, { admin: true });
+// ───────────────────────── Рейтинг (lib/rating-*.js) ─────────────────────────
+// Записи рейтингу, підвищення балів студентами, історія змін, статистика,
+// панель адміністратора та синхронізація з Google-таблицею.
+const rating = createRatingService(ctx);
+const ratingReader = createRatingReader(ctx, rating);
+registerRatingRoutes(ctx, rating, ratingReader);
 
 // — оцінки (адмін)
 route('GET', '/api/admin/grades', async () => {
@@ -1510,6 +1218,21 @@ route('POST', '/api/admin/users/:id/reset-devices', async ({ params }) => {
   const res = await users.updateOne({ _id: params.id }, { $set: { deviceIds: [], deviceMeta: {}, pendingDevices: [] } });
   if (!res.matchedCount) throw new HttpError(404, 'Користувача не знайдено.');
   return ok();
+}, { admin: true });
+
+// Скидання пароля: одноразовий код на 24 години. Старий пароль і всі сеанси одразу перестають діяти.
+route('POST', '/api/admin/users/:id/reset-password', async ({ params, user }) => {
+  if (params.id === user._id) throw new HttpError(400, 'Свій пароль змініть у профілі.');
+  const target = await users.findOne({ _id: params.id });
+  if (!target) throw new HttpError(404, 'Користувача не знайдено.');
+  const code = resetCode(10);
+  const expiresAt = new Date(Date.now() + 24 * 3600 * 1000);
+  await users.updateOne({ _id: target._id }, {
+    $set: { resetCodeHash: await hashPassword(code), resetCodeExpiresAt: expiresAt },
+    $unset: { passwordHash: '', passwordSetAt: '' },
+    $inc: { sessionVersion: 1 },
+  });
+  return { code: `${code.slice(0, 5)}-${code.slice(5)}`, expiresAt };
 }, { admin: true });
 
 // Призначення ролі: староста / заступник старости / без ролі (адмін).
@@ -1599,11 +1322,17 @@ async function handleApi(req, res, url) {
       const data = verifyToken(auth.startsWith('Bearer ') ? auth.slice(7) : '');
       user = data && (await users.findOne({ _id: data.u }));
       if (!user || !data.d) throw new HttpError(401, 'Оновіть сеанс: увійдіть у застосунок знову.');
+      normDevices(user);
+      // Токен діє, лише поки пристрій прив’язаний до акаунта і сеанси не скинуто (зміна пароля, скидання).
+      if (!user.deviceIds.includes(data.d) || (data.v || 0) !== (user.sessionVersion || 0)) {
+        throw new HttpError(401, 'Сеанс завершено. Увійдіть знову.');
+      }
       const headerDevice = str(req.headers['x-device-id'], 100);
       if (data.d && headerDevice && data.d !== headerDevice) throw new HttpError(401, 'Сеанс не належить цьому пристрою. Увійдіть знову.');
       req.deviceId = data.d || headerDevice;
       if (r.admin && !user.isAdmin) throw new HttpError(403, 'Лише для адміністратора.');
       if (r.mod && !isMod(user)) throw new HttpError(403, 'Лише для адміністратора, старости чи заступника.');
+      touchUser(user);
     }
     const body = req.method === 'GET' || req.method === 'DELETE' ? {} : await readBody(req);
     const ip = ((req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket.remoteAddress || '').trim();
@@ -1676,11 +1405,7 @@ const server = http.createServer((req, res) => {
 (async () => {
   VAPID_PUBLIC = await initDb();
   await ensureGradesBaseline().catch((e) => console.error('ensureGradesBaseline:', e));
-  if (GOOGLE_SHEET_ID) {
-    await syncGoogleSheetRating();
-    setInterval(syncGoogleSheetRating, GOOGLE_SHEET_INTERVAL_MS).unref();
-    console.log(`Google Sheets sync увімкнено: кожні ${Math.round(GOOGLE_SHEET_INTERVAL_MS / 60000)} хв.`);
-  }
+  rating.start();
   server.listen(PORT, () => console.log(`Щоденник: сервер слухає порт ${PORT}`));
   setInterval(tick, TICK_MS);
   setInterval(gradesTick, 60 * 1000);
